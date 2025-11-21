@@ -1,0 +1,14 @@
+{
+  "name": "hireedge-backend-mvp",
+  "version": "1.0.0",
+  "description": "Backend API for HireEdge MVP (resume, skills matching, career roadmap, talent profile).",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "node index.js",
+    "test": "echo \"No tests yet\""
+  },
+  "dependencies": {
+    "axios": "^1.7.0"
+  }
+}
