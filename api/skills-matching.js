@@ -1,6 +1,17 @@
 // POST /api/skills-matching
 // Body: { cvText: string, jobDescription: string }
+
 module.exports = async (req, res) => {
+  // ---- CORS HEADERS ----
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  // ----------------------
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -8,7 +19,7 @@ module.exports = async (req, res) => {
   try {
     let body = "";
 
-    req.on("data", chunk => {
+    req.on("data", (chunk) => {
       body += chunk.toString();
     });
 
@@ -28,21 +39,23 @@ module.exports = async (req, res) => {
           .json({ error: "cvText and jobDescription are required" });
       }
 
-      // TODO: replace with real NLP/AI skill extraction
-      const mockCvSkills = ["Communication", "Teamwork", "Problem Solving"];
-      const mockJobSkills = ["Teamwork", "Stakeholder Management", "Leadership"];
+      // ---- Very simple "skill" extraction from job description ----
+      const words = jobDescription
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 3);
 
-      const matchedSkills = mockCvSkills.filter(s =>
-        mockJobSkills.includes(s)
-      );
-      const missingSkills = mockJobSkills.filter(
-        s => !mockCvSkills.includes(s)
-      );
+      const uniqueSkills = [...new Set(words)];
+      const cvLower = cvText.toLowerCase();
+
+      const matchedSkills = uniqueSkills.filter((s) => cvLower.includes(s));
+      const missingSkills = uniqueSkills.filter((s) => !cvLower.includes(s));
 
       const fitScore =
-        Math.round(
-          (matchedSkills.length / (mockJobSkills.length || 1)) * 100
-        ) || 0;
+        uniqueSkills.length === 0
+          ? 0
+          : Math.round((matchedSkills.length / uniqueSkills.length) * 100);
 
       return res.status(200).json({
         ok: true,
@@ -50,7 +63,7 @@ module.exports = async (req, res) => {
         matchedSkills,
         missingSkills,
         explanation:
-          "This is a placeholder engine. In the real system we will parse both CV and job description to extract and compare skills."
+          "This is a first version Skills Matching engine. It extracts important words from the job description and checks if they appear in the CV."
       });
     });
   } catch (err) {
