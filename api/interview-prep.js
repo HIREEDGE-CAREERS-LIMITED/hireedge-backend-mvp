@@ -58,6 +58,7 @@ module.exports = async (req, res) => {
       const mentionsData = jdLower.includes("data");
       const mentionsTeam = jdLower.includes("team");
       const mentionsStakeholder = jdLower.includes("stakeholder");
+      const mentionsLeadership = jdLower.includes("lead") || mentionsManager;
 
       const jdFocus = [
         mentionsSales && "sales performance",
