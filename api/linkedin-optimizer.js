@@ -1,108 +1,110 @@
-// POST /api/linkedin-optimizer
-// Body: { name, currentRole, targetRole?, skills?, achievements?, tone? }
+import OpenAI from "openai";
 
-module.exports = async (req, res) => {
-  // ---- CORS HEADERS ----
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+const ALLOWED_ORIGIN = "https://hireedge-mvp-web.vercel.app";
+
+export default async function handler(req, res) {
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
-  // ----------------------
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
-    let body = "";
+    const { currentRole, targetRole, industry, cvText } = req.body;
 
-    req.on("data", (chunk) => {
-      body += chunk.toString();
+    if (!cvText) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "cvText is required for optimisation" });
+    }
+
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: `
+You are the "HireEdge LinkedIn Profile Optimiser".
+
+Generate a high-conversion LinkedIn profile for job search and recruiter visibility.
+
+Always respond with ONLY this JSON structure:
+
+{
+  "headline": string,
+  "about": string,
+  "summary": string,
+  "strengths": string[],
+  "searchKeywords": string[],
+  "hashtags": string[],
+  "experienceBullets": string[]
+}
+
+Rules:
+- Headline max ~220 characters, focused on target role & value.
+- About: 3–6 short paragraphs, friendly and professional.
+- Strengths: 4–8 bullet points.
+- Search keywords: recruiter search terms (no #).
+- Hashtags: 5–12 best hashtags for this profile (with #).
+- Experience bullets: achievement-style bullet lines that user can paste into Experience section.
+- Do NOT include backticks or any text outside valid JSON.
+        `.trim(),
+        },
+        {
+          role: "user",
+          content: `
+CURRENT ROLE: ${currentRole || "Not specified"}
+TARGET ROLE: ${targetRole || "Not specified"}
+INDUSTRY: ${industry || "General"}
+
+CANDIDATE CV / BACKGROUND:
+${cvText}
+
+Create the LinkedIn profile elements and return JSON only.
+        `.trim(),
+        },
+      ],
     });
 
-    req.on("end", async () => {
-      let data = {};
-      try {
-        data = JSON.parse(body || "{}");
-      } catch (e) {
-        return res.status(400).json({ error: "Invalid JSON body" });
-      }
+    const raw = response.output[0].content[0].text;
 
-      const {
-        name,
-        currentRole,
-        targetRole = "",
-        skills = [],
-        achievements = "",
-        tone = "professional"
-      } = data;
-
-      if (!name || !currentRole) {
-        return res.status(400).json({
-          error: "name and currentRole are required"
-        });
-      }
-
-      const skillsText =
-        skills && skills.length ? skills.join(" · ") : "core professional skills";
-
-      const shortSkills =
-        skills && skills.length ? skills.slice(0, 5).join(" | ") : currentRole;
-
-      const cleanTarget =
-        targetRole && targetRole.trim().length > 0
-          ? targetRole.trim()
-          : currentRole;
-
-      // Headline
-      const headline = `${currentRole} | ${cleanTarget} | ${shortSkills}`;
-
-      // About section
-      const about =
-        `${name} is a ${tone === "friendly" ? "people-focused" : "results-driven"} ${currentRole.toLowerCase()} ` +
-        `with experience in ${cleanTarget.toLowerCase()}. ` +
-        `Skilled in ${skillsText}. ` +
-        `Known for taking ownership, building strong relationships and delivering consistent outcomes.\n\n` +
-        (achievements
-          ? `Key achievements include:\n${achievements.trim()}\n\n`
-          : "") +
-        `On LinkedIn, ${name.split(" ")[0]} is looking to connect with ` +
-        `${cleanTarget.toLowerCase()} opportunities, decision-makers and teams who value growth, learning and collaboration.`;
-
-      // Summary bullets for "About" or "Featured"
-      const highlights = [
-        `Experience as ${currentRole}`,
-        `Strengths in ${skillsText}`,
-        "Comfortable working in fast-paced, changing environments",
-        "Strong communication and stakeholder management",
-        "Committed to continuous learning and improvement"
-      ];
-
-      const profile = {
-        name,
-        currentRole,
-        targetRole: cleanTarget,
-        skills,
-        headline,
-        about,
-        highlights,
-        suggestions: [
-          "Add this headline directly to your LinkedIn profile.",
-          "Use the About section as your LinkedIn summary (you can shorten it if needed).",
-          "Turn the highlights into bullet points in your Experience and Featured sections."
-        ]
-      };
-
-      return res.status(200).json({
-        ok: true,
-        profile
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.error("linkedin-optimizer JSON parse error:", raw);
+      return res.status(500).json({
+        ok: false,
+        error: "Failed to parse AI response",
+        raw,
       });
-    });
+    }
+
+    const result = {
+      ok: true,
+      headline: parsed.headline || "",
+      about: parsed.about || "",
+      summary: parsed.summary || "",
+      strengths: parsed.strengths || [],
+      searchKeywords: parsed.searchKeywords || [],
+      hashtags: parsed.hashtags || [],
+      experienceBullets: parsed.experienceBullets || [],
+    };
+
+    return res.status(200).json(result);
   } catch (err) {
-    console.error("linkedin-optimizer error", err);
-    return res.status(500).json({ error: "Internal server error" });
+    console.error("linkedin-optimizer error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "LinkedIn optimiser failed. Please try again." });
   }
-};
+}
