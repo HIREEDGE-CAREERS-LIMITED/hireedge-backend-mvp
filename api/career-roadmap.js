@@ -1,6 +1,18 @@
 import OpenAI from "openai";
 
+const ALLOWED_ORIGIN = "https://hireedge-mvp-web.vercel.app";
+
 export default async function handler(req, res) {
+  // CORS headers for all requests
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // Handle preflight (OPTIONS) request
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -45,7 +57,7 @@ Always respond with this exact JSON structure:
 }
 
 Do NOT add explanations or text outside JSON.
-          `.trim(),
+        `.trim(),
         },
         {
           role: "user",
@@ -56,7 +68,7 @@ Experience (years): ${experienceYears ?? "Not provided"}
 Current skills: ${Array.isArray(skills) ? skills.join(", ") : skills}
 
 Create a realistic roadmap for this person.
-          `.trim(),
+        `.trim(),
         },
       ],
     });
@@ -70,9 +82,9 @@ Create a realistic roadmap for this person.
       roadmap = { summary: "Error parsing JSON", raw };
     }
 
-    res.status(200).json({ ok: true, roadmap });
+    return res.status(200).json({ ok: true, roadmap });
   } catch (err) {
     console.error("Roadmap error:", err);
-    res.status(500).json({ ok: false, error: "Roadmap engine failed" });
+    return res.status(500).json({ ok: false, error: "Roadmap engine failed" });
   }
 }
