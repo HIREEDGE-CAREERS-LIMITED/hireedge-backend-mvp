@@ -1,74 +1,95 @@
-// POST /api/talent-profile
-// Body: { name, headline, skills, experience }
+import OpenAI from "openai";
 
-module.exports = async (req, res) => {
-  // ---- CORS HEADERS ----
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+const ALLOWED_ORIGIN = "https://hireedge-mvp-web.vercel.app";
+
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-  // ----------------------
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST")
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {
-    let body = "";
+    const { fullName, currentRole, experienceYears, skills, cvText } = req.body;
 
-    req.on("data", (chunk) => {
-      body += chunk.toString();
+    if (!cvText || !fullName) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "fullName and cvText are required" });
+    }
+
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: `
+You are HireEdge's Talent Profile Engine.
+Generate a clean, recruiter-ready talent card from the user's career data.
+
+Return ONLY this JSON structure:
+
+{
+  "title": string,
+  "bio": string,
+  "skills": string[],
+  "achievements": string[],
+  "expertiseTags": string[],
+  "linkedinHeadline": string
+}
+
+Rules:
+- Title = best role position (ex: "Sales Manager", "Data Analyst").
+- Bio = 3 short crisp paragraphs summarizing the user's strengths.
+- Skills = 6–12 strongest skills extracted from CV.
+- Achievements = 4–8 bullet achievements using STAR style.
+- Expertise tags = 6–12 short tags used by recruiters.
+- LinkedIn headline = 120–200 character strong headline.
+- No backticks, no commentary, JSON only.
+        `.trim(),
+        },
+        {
+          role: "user",
+          content: `
+Full Name: ${fullName}
+Current Role: ${currentRole}
+Experience: ${experienceYears || "Not specified"} years
+Skills: ${skills?.join(", ")}
+CV Text:
+${cvText}
+
+Create the talent profile JSON.
+        `.trim(),
+        },
+      ],
     });
 
-    req.on("end", async () => {
-      let data = {};
-      try {
-        data = JSON.parse(body || "{}");
-      } catch (e) {
-        return res.status(400).json({ error: "Invalid JSON body" });
-      }
+    const raw = response.output[0].content[0].text;
 
-      const { name, headline, skills = [], experience = "" } = data;
-
-      if (!name || !headline) {
-        return res.status(400).json({
-          error: "name and headline are required"
-        });
-      }
-
-      const skillList =
-        skills && skills.length ? skills.join(", ") : "core professional skills";
-
-      const profile = {
-        name,
-        headline,
-        skills,
-        summary: `Professional with strengths in ${skillList}. Experienced in delivering results through adaptability, teamwork, and stakeholder communication.`,
-        experience: experience || "Experience details coming soon.",
-        profileSections: {
-          about: `${name} is a driven professional with strong capabilities in ${skillList}. Known for problem-solving, ownership, and consistent execution.`,
-          highlights: [
-            "Strong communication & leadership capabilities",
-            "Ability to manage multiple responsibilities",
-            "Experience working in fast-paced environments",
-            "Enthusiastic learner with a growth mindset"
-          ],
-          skills: skills,
-          finalNote:
-            "This is an auto-generated Talent Profile. The engine will become more advanced in future versions."
-        }
-      };
-
-      return res.status(200).json({
-        ok: true,
-        profile
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.log("Talent profile raw:", raw);
+      return res.status(500).json({
+        ok: false,
+        error: "Failed to parse talent profile JSON",
+        raw,
       });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      ...parsed,
     });
   } catch (err) {
-    console.error("talent-profile error", err);
-    return res.status(500).json({ error: "Internal server error" });
+    console.error("Talent Profile Engine Error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Talent profile generation failed" });
   }
-};
+}
