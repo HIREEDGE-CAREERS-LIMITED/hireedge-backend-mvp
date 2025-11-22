@@ -1,3 +1,4 @@
+// api/career-pack.js
 import OpenAI from "openai";
 
 const ALLOWED_ORIGIN = "https://hireedge-mvp-web.vercel.app";
@@ -26,114 +27,133 @@ export default async function handler(req, res) {
       sector
     } = req.body || {};
 
-    if (!cvText) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "cvText is required for analysis" });
+    // Minimal validation – same fields as frontend sends
+    if (!cvText || !currentRole || !targetRole) {
+      return res.status(400).json({
+        ok: false,
+        error: "currentRole, targetRole and cvText are required"
+      });
     }
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
-      response_format: { type: "json_object" },
+      max_output_tokens: 1200,
       input: [
         {
           role: "system",
           content: `
-You are HireEdge's One-Click Career Pack engine.
+You are HireEdge's One-Click Career Pack Engine.
 
-You receive a candidate profile (CV text, job description, role, sector)
-and MUST return a SINGLE JSON object with this EXACT structure:
+You receive:
+- currentRole
+- targetRole
+- experienceYears
+- sector
+- jobDescription (optional)
+- cvText (full CV text)
+
+Return a SINGLE valid JSON object ONLY, no explanation, with this exact shape:
 
 {
   "ats": {
-    "score": number,                    // 0-100
-    "matchedKeywords": string[],
-    "missingKeywords": string[],
-    "summary": string
+    "score": number,
+    "strengths": [string],
+    "risks": [string]
   },
-  "skills": {
-    "overallFit": number,               // 0-100
-    "matchedSkills": string[],
-    "partialMatchSkills": string[],
-    "missingSkills": string[],
-    "gapSummary": string
+  "skillsMatch": {
+    "overallFit": number,
+    "matched": [string],
+    "gaps": [string],
+    "learningPlan": [
+      {
+        "area": string,
+        "actions": [string]
+      }
+    ]
   },
   "roadmap": {
     "summary": string,
-    "timeframeMonths": number,
+    "months": number,
     "stages": [
       {
         "name": string,
-        "durationWeeks": number,
-        "focus": string,
-        "actions": string[]
+        "timeframe": string,
+        "focus": [string]
       }
     ]
   },
   "linkedin": {
     "headline": string,
     "about": string,
-    "strengths": string[],
-    "hashtags": string[]
+    "keywords": [string]
   },
   "interview": {
-    "generalQuestions": string[],
-    "roleSpecificQuestions": string[],
-    "behaviouralQuestions": string[]
-  },
-  "visaHint": {
-    "ukRoute": string,                  // e.g. "Skilled Worker", "Graduate", "Innovator Founder (high-level)"
     "summary": string,
-    "flags": string[]
+    "questions": [
+      {
+        "question": string,
+        "sampleAnswerBulletPoints": [string]
+      }
+    ]
+  },
+  "visa": {
+    "note": string,
+    "ukRoutes": [string]
   }
 }
 
 Rules:
-- Keep text concise and practical.
-- Use UK wording when talking about visas and roles.
-- Never mention that you are an AI model.
-- If job description is empty, base ATS & skills on targetRole + sector + cvText.
-        `.trim()
+- JSON MUST be valid and parseable.
+- Use numbers for scores (0–100).
+- Keep text concise but useful for a real candidate.
+- Tailor everything to the provided data.
+`
         },
         {
           role: "user",
-          content: JSON.stringify({
-            jobDescription: jobDescription || "",
-            cvText,
-            currentRole: currentRole || "",
-            targetRole: targetRole || "",
-            experienceYears: experienceYears || "",
-            sector: sector || ""
-          })
+          content: `
+Current role: ${currentRole}
+Target role: ${targetRole}
+Years of experience: ${experienceYears || "Not specified"}
+Sector: ${sector || "Not specified"}
+
+Job description (if any):
+${jobDescription || "Not provided"}
+
+Candidate CV:
+${cvText}
+`
         }
       ]
     });
 
     const raw =
-      response.output?.[0]?.content?.[0]?.text ||
-      response.output_text ||
+      response.output?.[0]?.content?.[0]?.text ??
+      response.output_text ??
       "";
 
-    let pack;
+    let data;
     try {
-      pack = JSON.parse(raw);
-    } catch (e) {
-      console.error("career-pack JSON parse error:", e, raw);
-      return res
-        .status(500)
-        .json({ ok: false, error: "Failed to parse AI response" });
+      data = JSON.parse(raw);
+    } catch (err) {
+      console.error("career-pack JSON parse error:", err, raw);
+      return res.status(500).json({
+        ok: false,
+        error: "Failed to parse AI response"
+      });
     }
 
     return res.status(200).json({
       ok: true,
-      pack
+      ...data
     });
   } catch (err) {
     console.error("career-pack error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "Career pack generation failed" });
+    return res.status(500).json({
+      ok: false,
+      error: "Career pack generation failed"
+    });
   }
 }
