@@ -1,112 +1,106 @@
-// /api/generate-resume.js
-// Enhanced AI Resume Writer Engine (MVP+ Innovation)
+import OpenAI from "openai";
 
-module.exports = async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+const ALLOWED_ORIGIN = "https://hireedge-mvp-web.vercel.app";
+
+export default async function handler(req, res) {
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST")
-    return res.status(405).json({ error: "Method not allowed" });
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
 
   try {
-    let body = "";
-    req.on("data", (chunk) => (body += chunk.toString()));
+    const { jobDescription, cvText } = req.body;
 
-    req.on("end", async () => {
-      let data = {};
-      try {
-        data = JSON.parse(body || "{}");
-      } catch {
-        return res.status(400).json({ error: "Invalid JSON" });
-      }
+    if (!jobDescription || !cvText) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "jobDescription and cvText are required" });
+    }
 
-      const { cvText, jobDescription } = data;
-
-      if (!cvText || !jobDescription) {
-        return res.status(400).json({
-          error: "cvText and jobDescription are required",
-        });
-      }
-
-      // --- Extract keywords ---
-      const rawWords = jobDescription
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, " ")
-        .split(/\s+/)
-        .filter((w) => w.length > 3);
-
-      const uniqueKeywords = [...new Set(rawWords)];
-      const cvLower = cvText.toLowerCase();
-
-      const matchedKeywords = uniqueKeywords.filter((k) =>
-        cvLower.includes(k)
-      );
-      const missingKeywords = uniqueKeywords.filter(
-        (k) => !cvLower.includes(k)
-      );
-
-      const atsScore = uniqueKeywords.length
-        ? Math.round(
-            (matchedKeywords.length / uniqueKeywords.length) * 100
-          )
-        : 0;
-
-      // ---- Generate rewritten sections ----
-      const summary = `A results-driven professional with strong experience in ${matchedKeywords
-        .slice(0, 6)
-        .join(", ")}. Proven ability to match job requirements, deliver measurable results and adapt to dynamic business environments.`;
-
-      const skills = [
-        ...new Set([
-          ...matchedKeywords.slice(0, 12),
-          "communication",
-          "leadership",
-          "customer service",
-          "problem-solving",
-        ]),
-      ];
-
-      const rewrittenExperience = `
-Rewritten Experience (ATS-Aligned)
-• Delivered measurable results aligned to job requirements.
-• Strengthened performance in areas such as: ${matchedKeywords
-        .slice(0, 8)
-        .join(", ")}.
-• Applied strong analytical and operational skills to support business objectives.
-• Collaborated with cross-functional teams to improve performance and service quality.
-• Demonstrated adaptability and consistent achievement in demanding environments.
-`;
-
-      const optimisedResume = `
-========================================
-ATS-Optimised Resume (AI Draft)
-========================================
-
-⭐ **Professional Summary**
-${summary}
-
-⭐ **Key Skills**
-${skills.join(", ")}
-
-⭐ **Experience Highlights (AI-Rewritten)**
-${rewrittenExperience}
-
-⭐ **Original CV (First 700 characters)**
-${cvText.substring(0, 700)}${cvText.length > 700 ? "..." : ""}
-`;
-
-      return res.status(200).json({
-        ok: true,
-        atsScore,
-        matchedKeywords,
-        missingKeywords,
-        optimisedResume,
-      });
+    const client = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
     });
+
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: `
+You are the "HireEdge AI Resume & ATS Engine".
+
+Your job:
+- Analyse the job description and the candidate's CV.
+- Optimise the CV for ATS and recruiter readability.
+- Score ATS match from 0–100.
+- Identify matched and missing keywords.
+- Return ONLY valid JSON matching this EXACT structure:
+
+{
+  "atsScore": number,              // 0–100
+  "matchedKeywords": string[],     // keywords found in CV that match JD
+  "missingKeywords": string[],     // important keywords missing in CV
+  "optimisedResume": string,       // full improved resume text
+  "summary": string,               // 2–3 line summary of the match
+  "suggestions": string[]          // bullet improvement suggestions
+}
+
+DO NOT include backticks, explanations, or text outside the JSON.
+        `.trim(),
+        },
+        {
+          role: "user",
+          content: `
+JOB DESCRIPTION:
+${jobDescription}
+
+CANDIDATE CV:
+${cvText}
+
+Analyse and return JSON only.
+          `.trim(),
+        },
+      ],
+    });
+
+    const raw = response.output[0].content[0].text;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.error("JSON parse error for resume engine:", raw);
+      return res.status(500).json({
+        ok: false,
+        error: "Failed to parse AI response",
+        raw,
+      });
+    }
+
+    // Normalise fields for frontend
+    const result = {
+      ok: true,
+      atsScore: parsed.atsScore ?? null,
+      matchedKeywords: parsed.matchedKeywords || [],
+      missingKeywords: parsed.missingKeywords || [],
+      optimisedResume: parsed.optimisedResume || "",
+      summary: parsed.summary || "",
+      suggestions: parsed.suggestions || [],
+    };
+
+    return res.status(200).json(result);
   } catch (err) {
-    console.error("Resume Engine Error:", err);
-    return res.status(500).json({ error: "Server error" });
+    console.error("generate-resume error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Resume engine failed. Please try again." });
   }
-};
+}
