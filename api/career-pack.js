@@ -1,11 +1,14 @@
 // /api/career-pack.js
 import OpenAI from "openai";
 
-// Allow both your Next/Vercel front-end AND Webflow, plus localhost for testing
+// Allow Next/Vercel, Webflow, custom domains + localhost
 const ALLOWED_ORIGINS = [
-  "https://hireedge-mvp-web.vercel.app",
-  "https://hireedge-2d4baa.webflow.io",
-  "http://localhost:3000"
+  "https://hireedge-backend-mvp.vercel.app", // backend itself (safety)
+  "https://hireedge-mvp-web.vercel.app",     // React app
+  "https://hireedge-2d4baa.webflow.io",      // Webflow staging
+  "https://hireedge.co.uk",                  // root custom domain
+  "https://www.hireedge.co.uk",              // www custom domain
+  "http://localhost:3000"                    // local dev
 ];
 
 const client = new OpenAI({
@@ -121,7 +124,6 @@ ${cvText}
     const content = response.output[0]?.content?.[0]?.text ?? "";
     let jsonText = content.trim();
 
-    // Sometimes model wraps in ```json ```
     if (jsonText.startsWith("```")) {
       jsonText = jsonText.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
     }
