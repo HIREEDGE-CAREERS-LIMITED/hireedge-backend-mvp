@@ -2,9 +2,10 @@
 import OpenAI from "openai";
 
 const ALLOWED_ORIGINS = [
-  "https://hireedge-mvp-web.vercel.app",
-  "https://hireedge-2d4baa.webflow.io",
-  "http://localhost:3000",
+  "https://hireedge-backend-mvp.vercel.app",  // self
+  "https://hireedge-mvp-web.vercel.app",      // React app
+  "https://hireedge-2d4baa.webflow.io",       // Webflow marketing site
+  "http://localhost:3000",                    // local dev
 ];
 
 const client = new OpenAI({
@@ -23,7 +24,6 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Vary", "Origin");
 
-  // Preflight
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -34,19 +34,20 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { jobDescription, cvText } = req.body || {};
+    const { jobDescription = "", cvText, targetRole = "" } = req.body || {};
 
-    if (!jobDescription || !cvText) {
+    // JD is optional, but CV is required
+    if (!cvText) {
       return res.status(200).json({
         ok: false,
-        error: "jobDescription and cvText are required",
+        error: "cvText is required",
       });
     }
 
     const systemPrompt = `
 You are the "HireEdge Skills & Gap Engine".
 
-Compare the JOB DESCRIPTION and the CANDIDATE CV.
+Compare the TARGET ROLE, JOB DESCRIPTION (if provided) and the CANDIDATE CV.
 Extract skills, classify them, and return ONLY this JSON:
 
 {
@@ -67,8 +68,11 @@ Do NOT return anything outside valid JSON.
     `.trim();
 
     const userPrompt = `
+TARGET ROLE:
+${targetRole || "Not specified"}
+
 JOB DESCRIPTION:
-${jobDescription}
+${jobDescription || "Not provided"}
 
 CANDIDATE CV:
 ${cvText}
