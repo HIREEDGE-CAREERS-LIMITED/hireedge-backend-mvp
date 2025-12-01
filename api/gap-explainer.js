@@ -1,9 +1,10 @@
 // /api/gap-explainer.js
 
 const ALLOWED_ORIGINS = [
-  "https://hireedge-mvp-web.vercel.app",
-  "https://hireedge-2d4baa.webflow.io",
-  "http://localhost:3000"
+  "https://hireedge-backend-mvp.vercel.app", // self
+  "https://hireedge-mvp-web.vercel.app",     // old React app
+  "https://hireedge-2d4baa.webflow.io",      // Webflow site
+  "http://localhost:3000"                    // local dev
 ];
 
 export default async function handler(req, res) {
@@ -44,7 +45,7 @@ export default async function handler(req, res) {
     }
 
     const fromRole = previousRole || "my previous role";
-    const toRole = targetRole || "this role";
+    const toRole   = targetRole || "this role";
 
     let cvLine = "";
     let interviewAnswer = "";
@@ -78,7 +79,7 @@ export default async function handler(req, res) {
         break;
 
       case "family":
-        cvLine = `Temporary break from work for family responsibilities, now fully available to return to full-time work.`;
+        cvLine = "Temporary break from work for family responsibilities, now fully available to return to full-time work.";
         interviewAnswer =
           "I took a temporary break from work to manage important family responsibilities. " +
           "It was a planned decision, and once the situation was stable I started preparing to return – updating my skills, reviewing the market and planning my next steps. Now I’m in a position to focus fully on my career again.";
@@ -87,7 +88,7 @@ export default async function handler(req, res) {
         break;
 
       case "health":
-        cvLine = `Short break from work for health reasons (now resolved) and cleared to return to full-time employment.`;
+        cvLine = "Short break from work for health reasons (now resolved) and cleared to return to full-time employment.";
         interviewAnswer =
           "I had a health issue which required me to step back from work for a period. It has been treated and I have medical clearance to work full-time again. " +
           "I’m happy to focus the rest of the conversation on how I can perform in this role now.";
