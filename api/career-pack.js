@@ -1,8 +1,9 @@
 // /api/career-pack.js
 import OpenAI from "openai";
 
+// Allow Webflow, custom domain, both Vercel apps, backend & localhost
 const ALLOWED_ORIGINS = [
-  // Custom domain (Webflow)
+  // Custom domain
   "https://hireedge.co.uk",
   "https://www.hireedge.co.uk",
 
@@ -13,13 +14,19 @@ const ALLOWED_ORIGINS = [
   // Webflow staging
   "https://hireedge-2d4baa.webflow.io",
 
+  // Backend (if ever called directly from same origin)
+  "https://hireedge-backend-mvp.vercel.app",
+
   // Local dev
-  "http://localhost:3000"
+  "http://localhost:3000",
 ];
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 export default async function handler(req, res) {
+  // ----- CORS -----
   const origin = req.headers.origin;
   const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
     ? origin
@@ -30,7 +37,8 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Vary", "Origin");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
   }
   // ----- END CORS -----
 
@@ -45,7 +53,7 @@ export default async function handler(req, res) {
       yearsExperience,
       sector,
       jobDescription,
-      jobText,      // in case Webflow sends jobText instead of jobDescription
+      jobText, // in case Webflow sends jobText instead of jobDescription
       cvText,
     } = req.body || {};
 
@@ -126,6 +134,7 @@ ${cvText}
     const content = response.output[0]?.content?.[0]?.text ?? "";
     let jsonText = content.trim();
 
+    // Strip ```json fences if model adds them
     if (jsonText.startsWith("```")) {
       jsonText = jsonText.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
     }
@@ -133,7 +142,8 @@ ${cvText}
     let data;
     try {
       data = JSON.parse(jsonText);
-    } catch (parseErr) {
+    } catch {
+      // Last attempt: extract first {...} block
       const match = jsonText.match(/\{[\s\S]*\}/);
       if (match) {
         try {
