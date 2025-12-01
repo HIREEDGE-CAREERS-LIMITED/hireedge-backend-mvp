@@ -1,23 +1,12 @@
 // /api/career-pack.js
 import OpenAI from "openai";
 
-// Allow Webflow, custom domain, both Vercel apps, backend & localhost
-const ALLOWED_ORIGINS = [
-  // Custom domain
+// Fixed domains we always allow
+const FIXED_ORIGINS = [
   "https://hireedge.co.uk",
   "https://www.hireedge.co.uk",
-
-  // Next.js apps on Vercel
   "https://hireedge-mvp-web.vercel.app",
-  "https://hireedge-mvp-c3z4ksfm6-srinath-senthilkumars-projects.vercel.app",
-
-  // Webflow staging
   "https://hireedge-2d4baa.webflow.io",
-
-  // Backend (if ever called directly from same origin)
-  "https://hireedge-backend-mvp.vercel.app",
-
-  // Local dev
   "http://localhost:3000",
 ];
 
@@ -27,10 +16,18 @@ const client = new OpenAI({
 
 export default async function handler(req, res) {
   // ----- CORS -----
-  const origin = req.headers.origin;
-  const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
-    ? origin
-    : ALLOWED_ORIGINS[0];
+  const origin = req.headers.origin || "";
+  let allowedOrigin = FIXED_ORIGINS[0];
+
+  // Allow:
+  //   - any of the fixed origins above
+  //   - ANY vercel.app preview / deployment
+  if (
+    origin &&
+    (FIXED_ORIGINS.includes(origin) || origin.endsWith(".vercel.app"))
+  ) {
+    allowedOrigin = origin;
+  }
 
   res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -131,10 +128,9 @@ ${cvText}
       ],
     });
 
-    const content = response.output[0]?.content?.[0]?.text ?? "";
-    let jsonText = content.trim();
+    let jsonText = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
 
-    // Strip ```json fences if model adds them
+    // Strip ```json fences if the model adds them
     if (jsonText.startsWith("```")) {
       jsonText = jsonText.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
     }
@@ -143,7 +139,6 @@ ${cvText}
     try {
       data = JSON.parse(jsonText);
     } catch {
-      // Last attempt: extract first {...} block
       const match = jsonText.match(/\{[\s\S]*\}/);
       if (match) {
         try {
