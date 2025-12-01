@@ -23,7 +23,9 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Vary", "Origin");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
   // ----- END CORS -----
 
   if (req.method !== "POST") {
@@ -31,7 +33,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { jobDescription, cvText } = req.body || {};
+    const { jobDescription, cvText, targetRole } = req.body || {};
 
     if (!jobDescription || !cvText) {
       return res.status(200).json({
@@ -64,6 +66,9 @@ Do NOT return anything outside valid JSON.
     `.trim();
 
     const userPrompt = `
+TARGET ROLE:
+${targetRole || "Not specified"}
+
 JOB DESCRIPTION:
 ${jobDescription}
 
@@ -83,6 +88,7 @@ Analyse skills and gaps and return JSON only.
 
     let raw = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
 
+    // strip ```json fences if model adds them
     if (raw.startsWith("```")) {
       raw = raw.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
     }
