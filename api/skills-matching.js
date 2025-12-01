@@ -1,19 +1,30 @@
 // /api/skills-matching.js
 import OpenAI from "openai";
 
+const ALLOWED_ORIGINS = [
+  "https://hireedge-mvp-web.vercel.app",
+  "https://hireedge-2d4baa.webflow.io",
+  "http://localhost:3000",
+];
+
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 export default async function handler(req, res) {
-  // ----- CORS (open to all origins – same as your other Node funcs) -----
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  // ----- CORS -----
+  const origin = req.headers.origin;
+  const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
+    ? origin
+    : ALLOWED_ORIGINS[0];
+
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Vary", "Origin");
 
+  // Preflight
   if (req.method === "OPTIONS") {
-    // Preflight response
     return res.status(200).end();
   }
   // ----- END CORS -----
@@ -39,15 +50,15 @@ Compare the JOB DESCRIPTION and the CANDIDATE CV.
 Extract skills, classify them, and return ONLY this JSON:
 
 {
-  "overallFit": number,              // 0–100 overall fit score
-  "matchedSkills": string[],         // skills clearly present in CV
-  "partialMatchSkills": string[],    // skills somewhat present / implied
-  "missingSkills": string[],         // important skills missing
-  "gapSummary": string,              // 2–3 line explanation of key gaps
-  "learningPlan": [                  // short plan to close gaps
+  "overallFit": number,
+  "matchedSkills": string[],
+  "partialMatchSkills": string[],
+  "missingSkills": string[],
+  "gapSummary": string,
+  "learningPlan": [
     {
       "skill": string,
-      "actions": string[]            // concrete steps or resources
+      "actions": string[]
     }
   ]
 }
@@ -65,7 +76,7 @@ ${cvText}
 Analyse skills and gaps and return JSON only.
     `.trim();
 
-    const response = await client.responses.create({
+    const aiRes = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
         { role: "system", content: systemPrompt },
@@ -73,9 +84,9 @@ Analyse skills and gaps and return JSON only.
       ],
     });
 
-    let raw = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
+    let raw = aiRes.output?.[0]?.content?.[0]?.text?.trim() ?? "";
 
-    // Strip ```json fences if the model adds them
+    // Strip ``` fences if added
     if (raw.startsWith("```")) {
       raw = raw.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
     }
@@ -92,7 +103,7 @@ Analyse skills and gaps and return JSON only.
       });
     }
 
-    const result = {
+    return res.status(200).json({
       ok: true,
       overallFit: parsed.overallFit ?? null,
       matchedSkills: parsed.matchedSkills || [],
@@ -100,9 +111,7 @@ Analyse skills and gaps and return JSON only.
       missingSkills: parsed.missingSkills || [],
       gapSummary: parsed.gapSummary || "",
       learningPlan: parsed.learningPlan || [],
-    };
-
-    return res.status(200).json(result);
+    });
   } catch (err) {
     console.error("skills-matching error:", err);
     return res.status(200).json({
