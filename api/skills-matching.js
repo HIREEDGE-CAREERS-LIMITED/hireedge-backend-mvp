@@ -1,29 +1,19 @@
 // /api/skills-matching.js
 import OpenAI from "openai";
 
-const ALLOWED_ORIGINS = [
-  "https://hireedge-mvp-web.vercel.app",
-  "https://hireedge-2d4baa.webflow.io",
-  "http://localhost:3000",
-];
-
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 export default async function handler(req, res) {
-  // ----- CORS -----
-  const origin = req.headers.origin;
-  const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
-    ? origin
-    : ALLOWED_ORIGINS[0];
-
-  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  // ----- CORS (open to all origins – same as your other Node funcs) -----
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Vary", "Origin");
 
   if (req.method === "OPTIONS") {
+    // Preflight response
     return res.status(200).end();
   }
   // ----- END CORS -----
@@ -33,7 +23,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { jobDescription, cvText, targetRole } = req.body || {};
+    const { jobDescription, cvText } = req.body || {};
 
     if (!jobDescription || !cvText) {
       return res.status(200).json({
@@ -49,15 +39,15 @@ Compare the JOB DESCRIPTION and the CANDIDATE CV.
 Extract skills, classify them, and return ONLY this JSON:
 
 {
-  "overallFit": number,
-  "matchedSkills": string[],
-  "partialMatchSkills": string[],
-  "missingSkills": string[],
-  "gapSummary": string,
-  "learningPlan": [
+  "overallFit": number,              // 0–100 overall fit score
+  "matchedSkills": string[],         // skills clearly present in CV
+  "partialMatchSkills": string[],    // skills somewhat present / implied
+  "missingSkills": string[],         // important skills missing
+  "gapSummary": string,              // 2–3 line explanation of key gaps
+  "learningPlan": [                  // short plan to close gaps
     {
       "skill": string,
-      "actions": string[]
+      "actions": string[]            // concrete steps or resources
     }
   ]
 }
@@ -66,9 +56,6 @@ Do NOT return anything outside valid JSON.
     `.trim();
 
     const userPrompt = `
-TARGET ROLE:
-${targetRole || "Not specified"}
-
 JOB DESCRIPTION:
 ${jobDescription}
 
@@ -88,7 +75,7 @@ Analyse skills and gaps and return JSON only.
 
     let raw = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
 
-    // strip ```json fences if model adds them
+    // Strip ```json fences if the model adds them
     if (raw.startsWith("```")) {
       raw = raw.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
     }
