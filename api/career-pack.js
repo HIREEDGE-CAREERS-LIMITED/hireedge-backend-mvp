@@ -1,21 +1,33 @@
 // /api/career-pack.js
 import OpenAI from "openai";
 
-const ALLOWED_ORIGIN = "https://hireedge-mvp-web.vercel.app";
+// Allow both your Next/Vercel front-end AND Webflow, plus localhost for testing
+const ALLOWED_ORIGINS = [
+  "https://hireedge-mvp-web.vercel.app",
+  "https://hireedge-2d4baa.webflow.io",
+  "http://localhost:3000"
+];
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 export default async function handler(req, res) {
-  // CORS
-  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  // ----- CORS -----
+  const origin = req.headers.origin;
+  const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
+    ? origin
+    : ALLOWED_ORIGINS[0];
+
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Vary", "Origin");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
+  // ----- END CORS -----
 
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
@@ -28,6 +40,7 @@ export default async function handler(req, res) {
       yearsExperience,
       sector,
       jobDescription,
+      jobText,      // in case Webflow sends jobText instead of jobDescription
       cvText,
     } = req.body || {};
 
@@ -41,12 +54,12 @@ export default async function handler(req, res) {
     const safeTargetRole = targetRole || "Not specified";
     const safeYears = yearsExperience || "Not specified";
     const safeSector = sector || "Not specified";
-    const safeJobDesc = jobDescription || "Not provided";
+    const safeJobDesc = jobDescription || jobText || "Not provided";
 
     const systemPrompt = `
 You are HireEdge's One-Click Career Pack Engine.
 
-You MUST return a **valid JSON object only**, with this exact structure and keys:
+You MUST return a valid JSON object only, with this exact structure and keys:
 
 {
   "ok": true,
@@ -117,7 +130,6 @@ ${cvText}
     try {
       data = JSON.parse(jsonText);
     } catch (parseErr) {
-      // Try to recover JSON substring if anything weird came back
       const match = jsonText.match(/\{[\s\S]*\}/);
       if (match) {
         try {
@@ -138,7 +150,6 @@ ${cvText}
       }
     }
 
-    // Ensure ok flag exists
     if (typeof data.ok !== "boolean") {
       data.ok = true;
     }
