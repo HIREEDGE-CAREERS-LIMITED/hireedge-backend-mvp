@@ -1,22 +1,25 @@
 // /api/career-pack.js
 import OpenAI from "openai";
 
-// Allow Next/Vercel, Webflow, custom domains + localhost
 const ALLOWED_ORIGINS = [
-  "https://hireedge-backend-mvp.vercel.app", // backend itself (safety)
-  "https://hireedge-mvp-web.vercel.app",     // React app
-  "https://hireedge-2d4baa.webflow.io",      // Webflow staging
-  "https://hireedge.co.uk",                  // root custom domain
-  "https://www.hireedge.co.uk",              // www custom domain
-  "http://localhost:3000"                    // local dev
+  // Custom domain (Webflow)
+  "https://hireedge.co.uk",
+  "https://www.hireedge.co.uk",
+
+  // Next.js apps on Vercel
+  "https://hireedge-mvp-web.vercel.app",
+  "https://hireedge-mvp-c3z4ksfm6-srinath-senthilkumars-projects.vercel.app",
+
+  // Webflow staging
+  "https://hireedge-2d4baa.webflow.io",
+
+  // Local dev
+  "http://localhost:3000"
 ];
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export default async function handler(req, res) {
-  // ----- CORS -----
   const origin = req.headers.origin;
   const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
     ? origin
@@ -27,8 +30,7 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Vary", "Origin");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
+  if (req.method === "OPTIONS") return res.status(200).end();
   }
   // ----- END CORS -----
 
