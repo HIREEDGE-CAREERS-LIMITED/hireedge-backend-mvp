@@ -19,7 +19,9 @@ export default async function handler(req, res) {
   const origin = req.headers.origin || "";
   let allowedOrigin = FIXED_ORIGINS[0];
 
-  // Allow fixed domains + any *.vercel.app
+  // Allow:
+  //   - any of the fixed origins above
+  //   - ANY vercel.app preview / deployment
   if (
     origin &&
     (FIXED_ORIGINS.includes(origin) || origin.endsWith(".vercel.app"))
@@ -48,7 +50,7 @@ export default async function handler(req, res) {
       yearsExperience,
       sector,
       jobDescription,
-      jobText, // sometimes sent as jobText
+      jobText, // in case Webflow sends jobText instead of jobDescription
       cvText,
     } = req.body || {};
 
@@ -64,11 +66,11 @@ export default async function handler(req, res) {
     const safeSector = sector || "Not specified";
     const safeJobDesc = jobDescription || jobText || "Not provided";
 
-    // ---------- 9-ENGINE SYSTEM PROMPT ----------
+    // 🔹 9 engines + master Career Pack JSON
     const systemPrompt = `
-You are HireEdge's 9-Engine One-Click Career Pack Engine.
+You are HireEdge's One-Click Career Pack Engine.
 
-You MUST return a valid JSON object ONLY, with EXACTLY these top-level keys:
+You MUST return a valid JSON object only, with this exact structure and keys:
 
 {
   "ok": true,
@@ -80,7 +82,7 @@ You MUST return a valid JSON object ONLY, with EXACTLY these top-level keys:
   "skills": {
     "explicit": string[],
     "missing": string[],
-    "skills_summary": string
+    "development_plan": string[]
   },
   "roadmap": {
     "immediate": string[],
@@ -90,46 +92,48 @@ You MUST return a valid JSON object ONLY, with EXACTLY these top-level keys:
   "linkedin": {
     "headline": string,
     "summary": string,
-    "skills": string[]
+    "skills": string[],
+    "experience_bullets": string[]
   },
   "interview": {
     "tips": string[],
-    "example_questions": string[]
+    "example_questions": string[],
+    "sample_answers": string[]
   },
   "visa": {
     "status": string,
-    "recommendation": string
+    "best_fit_route": string,
+    "alternative_routes": string[],
+    "next_steps": string[]
   },
-  "talent_profile": {
-    "one_line_summary": string,
+  "profile": {
+    "headline": string,
+    "summary": string,
     "strengths": string[],
-    "risk_flags": string[]
+    "sectors": string[],
+    "ideal_roles": string[],
+    "key_contributions": string[]
   },
-  "salary": {
-    "estimated_range": string,
-    "commentary": string
+  "gap": {
+    "scenario": string,
+    "cv_line": string,
+    "interview_answer": string,
+    "email_to_recruiter": string
   },
-  "builder": {
-    "recommended_flow": string[],
-    "notes": string
+  "resume": {
+    "summary": string,
+    "improvements": string[],
+    "ats_score_before": number,
+    "ats_score_after": number,
+    "keywords_added": string[],
+    "rewritten_resume": string
   }
 }
 
-MAP each section to one of HireEdge's AI engines:
-
-- "ats"              → ATS Resume Optimiser
-- "skills"           → Skills Match & Gap
-- "roadmap"          → Career Roadmap
-- "linkedin"         → LinkedIn Engine
-- "interview"        → Interview Q&A Engine
-- "visa"             → Visa & Eligibility Engine (high-level only, no legal advice)
-- "talent_profile"   → Smart Talent Profile Engine
-- "salary"           → Salary & Market Signals Engine (high-level, no exact numbers)
-- "builder"          → AI Builder (suggests which engines to chain and in what order)
-
-RULES:
-- Do NOT add or remove top-level keys.
-- Do NOT include explanations, markdown, or comments.
+IMPORTANT RULES:
+- Do NOT include any extra top-level keys.
+- Do NOT wrap the JSON in markdown.
+- Do NOT add comments or explanations.
 - ONLY return JSON.
     `.trim();
 
@@ -156,19 +160,17 @@ ${cvText}
 
     let jsonText = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
 
-    // Strip ```json fences if added
+    // Strip ```json fences if the model adds them
     if (jsonText.startsWith("```")) {
       jsonText = jsonText
         .replace(/^```[a-zA-Z]*\n?/, "")
-        .replace(/```$/, "")
-        .trim();
+        .replace(/```$/, "");
     }
 
     let data;
     try {
       data = JSON.parse(jsonText);
     } catch {
-      // Try to salvage the first {...} block
       const match = jsonText.match(/\{[\s\S]*\}/);
       if (match) {
         try {
