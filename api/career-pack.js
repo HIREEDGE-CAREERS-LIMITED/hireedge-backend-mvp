@@ -42,7 +42,7 @@ export default async function handler(req, res) {
 
   try {
     const {
-      // core career info (already used today)
+      // core career info
       fullName,
       currentRole,
       targetRole,
@@ -54,15 +54,14 @@ export default async function handler(req, res) {
       cvText,
 
       // extra inputs so Pack can mimic other engines
-      // (you can wire these from your /pack form step-by-step)
-      careerGoal,          // e.g. "Sales Manager in UK retail within 6–12 months"
-      visaStatus,          // e.g. "Student visa, expiring 2026"
-      targetCountry,       // e.g. "UK"
-      visaMainGoal,        // e.g. "Work and settle long term"
-      gapDetails,          // plain text: type of gap, dates, reason, what you did
-      profileHighlights,   // bullet points of strengths / achievements
-      preferredSectors,    // comma-separated or text
-      salaryRange,         // optional text
+      careerGoal,        // "Sales Manager in UK retail within 6–12 months"
+      visaStatus,        // "Student visa, expiring 2026"
+      targetCountry,     // "UK"
+      visaMainGoal,      // "Work and settle long term"
+      gapDetails,        // type of gap, dates, reason, what you did
+      profileHighlights, // strengths / achievements
+      preferredSectors,  // text or comma-separated
+      salaryRange,       // optional
     } = req.body || {};
 
     if (!cvText) {
@@ -71,34 +70,44 @@ export default async function handler(req, res) {
         .json({ ok: false, error: "cvText is required for analysis" });
     }
 
-    const safeFullName   = fullName || "Candidate";
-    const safeCurrent    = currentRole || "Not specified";
-    const safeTarget     = targetRole || "Not specified";
-    const safeYears      = yearsExperience || "Not specified";
-    const safeSector     = sector || "Not specified";
-    const safeLocation   = location || "Not specified";
-    const safeJobDesc    = jobDescription || jobText || "Not provided";
-    const safeGoal       = careerGoal || "Not specified";
-    const safeVisaStatus = visaStatus || "Not specified";
-    const safeTargetCtry = targetCountry || "UK";
-    const safeVisaGoal   = visaMainGoal || "Work on a sponsored skilled role";
-    const safeGapDetails = gapDetails || "Candidate has no major career gaps or prefers not to highlight them.";
-    const safeHighlights = profileHighlights || "Use the CV to infer strengths, achievements and impact.";
-    const safePrefSectors = preferredSectors || safeSector;
-    const safeSalary     = salaryRange || "Not specified";
+    const safeFullName     = fullName || "Candidate";
+    const safeCurrent      = currentRole || "Not specified";
+    const safeTarget       = targetRole || "Not specified";
+    const safeYears        = yearsExperience || "Not specified";
+    const safeSector       = sector || "Not specified";
+    const safeLocation     = location || "Not specified";
+    const safeJobDesc      = jobDescription || jobText || "Not provided";
+    const safeGoal         = careerGoal || "Not specified";
+    const safeVisaStatus   = visaStatus || "Not specified";
+    const safeTargetCtry   = targetCountry || "UK";
+    const safeVisaGoal     = visaMainGoal || "Work on a sponsored skilled role";
+    const safeGapDetails   = gapDetails || "Candidate has no major career gaps or prefers not to highlight them.";
+    const safeHighlights   = profileHighlights || "Use the CV to infer strengths, achievements and impact.";
+    const safePrefSectors  = preferredSectors || safeSector;
+    const safeSalary       = salaryRange || "Not specified";
 
-    // 🔹 One prompt that drives all 8 engines + pack
+    // 🔹 One prompt that drives all 8 engines + Pack (9th)
     const systemPrompt = `
 You are HireEdge's One-Click Career Pack Engine.
 
-Your job is to behave like ALL 8 HireEdge AI engines at once and output a
-single JSON object that powers the One-Click Career Pack page AND the
-individual engine pages.
+Behave like ALL 8 HireEdge AI engines at once AND the One-Click Career Pack
+summary. You must output a SINGLE JSON object that powers:
+
+- The /pack page (combined view)
+- The individual engine pages
+- The dashboard summary
 
 You MUST return ONLY valid JSON with this EXACT structure and keys:
 
 {
   "ok": true,
+
+  "pack": {
+    "title": string,
+    "subtitle": string,
+    "highlights": string[],
+    "next_steps": string[]
+  },
 
   "ats": {
     "match": boolean,
@@ -168,20 +177,21 @@ You MUST return ONLY valid JSON with this EXACT structure and keys:
   }
 }
 
-MAPPING TO ENGINES (IMPORTANT):
+ENGINE MAPPING:
 
-- "ats"       -> ATS Resume Optimiser section on /resume and inside Pack.
-- "skills"    -> Skills Match & Gap section and skills-gap engine.
-- "roadmap"   -> 3-stage AI Career Roadmap engine.
-- "linkedin"  -> LinkedIn Profile Optimiser engine.
-- "interview" -> AI Interview Prep Coach engine.
-- "visa"      -> AI Visa Pathway Finder engine.
-- "profile"   -> AI Talent Profile Generator engine.
-- "gap"       -> Career Gap Explainer engine.
-- "resume"    -> Full ATS-friendly rewrites and scores for the CV.
+- "pack"     -> One-Click Career Pack main summary (top of /pack page).
+- "ats"      -> ATS Resume Optimiser (/resume + pack section).
+- "skills"   -> Skills Match & Gap (/skills + pack section).
+- "roadmap"  -> 3-stage AI Career Roadmap (/roadmap + pack section).
+- "linkedin" -> LinkedIn Profile Optimiser (/linkedin + pack section).
+- "interview"-> AI Interview Prep Coach (/interview + pack section).
+- "visa"     -> AI Visa Pathway Finder (/visa + pack section).
+- "profile"  -> AI Talent Profile Generator (/profile + pack section).
+- "gap"      -> Career Gap Explainer (/gap + pack section).
+- "resume"   -> Full ATS-friendly CV rewrite & scores.
 
 RULES:
-- Use ALL the structured inputs and the full CV + job description.
+- Use ALL structured inputs plus the full CV and job description.
 - Be concrete, UK-job-market realistic and endorsement-friendly.
 - Do NOT invent impossible visa routes or legal guarantees.
 - Do NOT include ANY keys outside the schema above.
