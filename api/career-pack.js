@@ -19,9 +19,7 @@ export default async function handler(req, res) {
   const origin = req.headers.origin || "";
   let allowedOrigin = FIXED_ORIGINS[0];
 
-  // Allow:
-  //   - any of the fixed origins above
-  //   - ANY vercel.app preview / deployment
+  // Allow fixed domains + any *.vercel.app
   if (
     origin &&
     (FIXED_ORIGINS.includes(origin) || origin.endsWith(".vercel.app"))
@@ -50,7 +48,7 @@ export default async function handler(req, res) {
       yearsExperience,
       sector,
       jobDescription,
-      jobText, // in case Webflow sends jobText instead of jobDescription
+      jobText, // sometimes sent as jobText
       cvText,
     } = req.body || {};
 
@@ -66,10 +64,11 @@ export default async function handler(req, res) {
     const safeSector = sector || "Not specified";
     const safeJobDesc = jobDescription || jobText || "Not provided";
 
+    // ---------- 9-ENGINE SYSTEM PROMPT ----------
     const systemPrompt = `
-You are HireEdge's One-Click Career Pack Engine.
+You are HireEdge's 9-Engine One-Click Career Pack Engine.
 
-You MUST return a valid JSON object only, with this exact structure and keys:
+You MUST return a valid JSON object ONLY, with EXACTLY these top-level keys:
 
 {
   "ok": true,
@@ -80,7 +79,8 @@ You MUST return a valid JSON object only, with this exact structure and keys:
   },
   "skills": {
     "explicit": string[],
-    "missing": string[]
+    "missing": string[],
+    "skills_summary": string
   },
   "roadmap": {
     "immediate": string[],
@@ -99,12 +99,38 @@ You MUST return a valid JSON object only, with this exact structure and keys:
   "visa": {
     "status": string,
     "recommendation": string
+  },
+  "talent_profile": {
+    "one_line_summary": string,
+    "strengths": string[],
+    "risk_flags": string[]
+  },
+  "salary": {
+    "estimated_range": string,
+    "commentary": string
+  },
+  "builder": {
+    "recommended_flow": string[],
+    "notes": string
   }
 }
 
-Do NOT include any extra keys.
-Do NOT include explanations, markdown or comments.
-ONLY return JSON.
+MAP each section to one of HireEdge's AI engines:
+
+- "ats"              → ATS Resume Optimiser
+- "skills"           → Skills Match & Gap
+- "roadmap"          → Career Roadmap
+- "linkedin"         → LinkedIn Engine
+- "interview"        → Interview Q&A Engine
+- "visa"             → Visa & Eligibility Engine (high-level only, no legal advice)
+- "talent_profile"   → Smart Talent Profile Engine
+- "salary"           → Salary & Market Signals Engine (high-level, no exact numbers)
+- "builder"          → AI Builder (suggests which engines to chain and in what order)
+
+RULES:
+- Do NOT add or remove top-level keys.
+- Do NOT include explanations, markdown, or comments.
+- ONLY return JSON.
     `.trim();
 
     const userPrompt = `
@@ -130,15 +156,19 @@ ${cvText}
 
     let jsonText = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
 
-    // Strip ```json fences if the model adds them
+    // Strip ```json fences if added
     if (jsonText.startsWith("```")) {
-      jsonText = jsonText.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
+      jsonText = jsonText
+        .replace(/^```[a-zA-Z]*\n?/, "")
+        .replace(/```$/, "")
+        .trim();
     }
 
     let data;
     try {
       data = JSON.parse(jsonText);
     } catch {
+      // Try to salvage the first {...} block
       const match = jsonText.match(/\{[\s\S]*\}/);
       if (match) {
         try {
