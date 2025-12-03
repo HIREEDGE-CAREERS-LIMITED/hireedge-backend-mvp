@@ -1,6 +1,8 @@
 import Stripe from "stripe";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+export const config = {
+  api: { bodyParser: true },
+};
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -8,34 +10,35 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { priceId, engine, userId } = req.body;
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-    if (!priceId) {
-      return res.status(400).json({ error: "Missing priceId" });
+    const { priceId, userId, engineId } = req.body;
+
+    if (!priceId || !userId || !engineId) {
+      return res.status(400).json({ error: "Missing fields" });
     }
 
-    // Create Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
-      customer_email: req.body.email || undefined,
       line_items: [
         {
           price: priceId,
           quantity: 1,
         },
       ],
+      success_url: `${process.env.APP_URL}/engine/${engineId}?success=true`,
+      cancel_url: `${process.env.APP_URL}/engine/${engineId}?canceled=true`,
       metadata: {
-        engine,
         userId,
+        engineId,
+        type: "single_engine",
       },
-      success_url: `${process.env.NEXT_PUBLIC_WEB_URL}/checkout/success?engine=${engine}`,
-      cancel_url: `${process.env.NEXT_PUBLIC_WEB_URL}/checkout/cancel`,
     });
 
-    return res.status(200).json({ url: session.url });
+    res.status(200).json({ url: session.url });
   } catch (err) {
-    console.error("Stripe create-checkout error:", err);
-    return res.status(500).json({ error: "Stripe checkout error" });
+    console.error("Stripe error:", err);
+    res.status(500).json({ error: "Stripe session failed" });
   }
 }
