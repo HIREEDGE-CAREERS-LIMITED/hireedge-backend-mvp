@@ -1,21 +1,25 @@
 import Stripe from "stripe";
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+import { buffer } from "micro";
+import supabase from "../../utils/supabaseClient";
 
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false },
 };
 
 export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).end("Method not allowed");
+  }
+
   const sig = req.headers["stripe-signature"];
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
   let event;
 
   try {
-    const rawBody = await buffer(req);
+    const buf = await buffer(req);
     event = stripe.webhooks.constructEvent(
-      rawBody,
+      buf.toString(),
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
@@ -24,25 +28,48 @@ export default async function handler(req, res) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // Handle when payment is successful
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-    const engine = session.metadata.engine;
-    const userId = session.metadata.userId;
+  try {
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object;
 
-    // TODO: Save purchase → Supabase
-    // purchases.insert({ userId, engine, stripe_session: session.id })
-    console.log("Payment success → unlock engine:", engine, "for user:", userId);
+        if (session.metadata.type === "single_engine") {
+          await supabase.from("purchases").insert({
+            user_id: session.metadata.userId,
+            engine_id: session.metadata.engineId,
+            stripe_session: session.id,
+            status: "paid",
+          });
+        }
+        break;
+      }
+
+      case "invoice.payment_succeeded": {
+        const subscription = event.data.object;
+
+        await supabase.from("subscriptions").insert({
+          user_id: subscription.customer,
+          stripe_subscription_id: subscription.id,
+          status: "active",
+        });
+        break;
+      }
+
+      case "customer.subscription.deleted": {
+        const subscription = event.data.object;
+
+        await supabase
+          .from("subscriptions")
+          .update({ status: "canceled" })
+          .eq("stripe_subscription_id", subscription.id);
+
+        break;
+      }
+    }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error("Webhook handler error:", err);
+    res.status(500).json({ error: "Server error" });
   }
-
-  res.json({ received: true });
-}
-
-// Utility to grab raw body
-function buffer(req) {
-  return new Promise((resolve) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-  });
 }
