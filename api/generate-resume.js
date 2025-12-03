@@ -4,7 +4,9 @@ import OpenAI from "openai";
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",
   "https://hireedge-2d4baa.webflow.io",
-  "http://localhost:3000"
+  "http://localhost:3000",
+  "https://hireedge.co.uk",
+  "https://www.hireedge.co.uk"
 ];
 
 const client = new OpenAI({
