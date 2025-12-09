@@ -1,20 +1,25 @@
 // pages/skills.js
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import { useAuth } from "../contexts/AuthContext";
-import AppHeader from "../components/AppHeader";
 
 const HE_API_BASE = "https://hireedge-backend-mvp.vercel.app";
 const CHECKOUT_API = "/api/stripe/create-checkout";
-const DRAFT_KEY = "he-skills-draft";
 
-export default function SkillsMatchGapEngine() {
+export default function SkillsGapPage() {
   const router = useRouter();
   const { user, loading: authLoading } = useAuth();
 
   const [targetRole, setTargetRole] = useState("");
-  const [cvText, setCvText] = useState("");
+  const [cvSnapshot, setCvSnapshot] = useState("");
   const [jobDescription, setJobDescription] = useState("");
+
+  const [hasAccess, setHasAccess] = useState(false);
+  const [hasConsumedRun, setHasConsumedRun] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+
+  const [loading, setLoading] = useState(false);
+  const [resultsVisible, setResultsVisible] = useState(false);
 
   const [overallFit, setOverallFit] = useState(null);
   const [gapSummary, setGapSummary] = useState(
@@ -25,52 +30,36 @@ export default function SkillsMatchGapEngine() {
   const [missingSkills, setMissingSkills] = useState([]);
   const [learningPlan, setLearningPlan] = useState([]);
 
-  const [hasResults, setHasResults] = useState(false);
-
-  const [loading, setLoading] = useState(false);
-  const [paying, setPaying] = useState(false);
-
-  const [hasAccess, setHasAccess] = useState(false);
-  const [hasConsumedRun, setHasConsumedRun] = useState(false);
-  const [checkingAuth, setCheckingAuth] = useState(true);
-
   const isLoggedIn = !!user;
   const userEmail = user?.email || "";
 
-  // ---------- helpers ----------
+  // ----- draft helpers -----
   function saveDraft() {
     if (typeof window === "undefined") return;
     try {
-      const payload = { targetRole, cvText, jobDescription };
-      window.localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
+      const payload = { targetRole, cvSnapshot, jobDescription };
+      window.localStorage.setItem("he-skills-draft", JSON.stringify(payload));
     } catch (e) {
-      console.warn("Unable to save skills draft:", e);
+      console.warn("Skills draft save failed:", e);
     }
   }
 
   function restoreDraft() {
     if (typeof window === "undefined") return;
     try {
-      const raw = window.localStorage.getItem(DRAFT_KEY);
+      const raw = window.localStorage.getItem("he-skills-draft");
       if (!raw) return;
       const d = JSON.parse(raw);
       if (d.targetRole) setTargetRole(d.targetRole);
-      if (d.cvText) setCvText(d.cvText);
+      if (d.cvSnapshot) setCvSnapshot(d.cvSnapshot);
       if (d.jobDescription) setJobDescription(d.jobDescription);
     } catch (e) {
-      console.warn("Unable to restore skills draft:", e);
+      console.warn("Skills draft restore failed:", e);
     }
   }
 
-  function redirectToLogin() {
-    saveDraft();
-    const currentUrl =
-      typeof window !== "undefined" ? window.location.href : "/skills";
-    router.push(`/login?redirect=${encodeURIComponent(currentUrl)}`);
-  }
-
-  async function runSkillsMatch(isAuto = false) {
-    if (!targetRole.trim() || !cvText.trim()) {
+  async function runSkillsEngine(isAuto = false) {
+    if (!targetRole.trim() || !cvSnapshot.trim()) {
       if (!isAuto) {
         alert("Please fill Target role & your CV / skills snapshot.");
       }
@@ -83,22 +72,23 @@ export default function SkillsMatchGapEngine() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          jobDescription: jobDescription.trim(),
-          cvText: cvText.trim(),
           targetRole: targetRole.trim(),
+          cvText: cvSnapshot.trim(),
+          jobDescription: jobDescription.trim(),
         }),
       });
 
       const data = await res.json();
-      console.log("Skills Match Result:", data);
+      console.log("Skills engine result:", data);
 
       if (!data.ok) {
         alert(data.error || "Something went wrong. Please try again.");
         return;
       }
 
-      setHasResults(true);
-      setOverallFit(data.overallFit ?? null);
+      setResultsVisible(true);
+      const fit = data.overallFit ?? null;
+      setOverallFit(fit);
       setGapSummary(
         data.gapSummary ||
           "The engine has analysed your skills vs the target role and highlighted matched, partial and missing skills below."
@@ -108,11 +98,9 @@ export default function SkillsMatchGapEngine() {
       setMissingSkills(data.missingSkills || []);
       setLearningPlan(data.learningPlan || []);
 
-      if (hasAccess) {
-        setHasConsumedRun(true);
-      }
+      if (hasAccess) setHasConsumedRun(true);
     } catch (err) {
-      console.error("Skills Match network error:", err);
+      console.error("Skills engine network error:", err);
       alert("Network error – please try again.");
     } finally {
       setLoading(false);
@@ -121,23 +109,20 @@ export default function SkillsMatchGapEngine() {
 
   async function goToStripeCheckout() {
     saveDraft();
-    setPaying(true);
+    setLoading(true);
     try {
       const res = await fetch(CHECKOUT_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          plan: "skills",
-          engineId: "skills",
-        }),
+        body: JSON.stringify({ engineId: "skills" }),
       });
 
       const data = await res.json();
-      console.log("Stripe session (skills):", data);
+      console.log("Stripe skills session:", data);
 
       if (!data.ok || !data.url) {
         alert(data.error || "Unable to start payment. Please try again.");
-        setPaying(false);
+        setLoading(false);
         return;
       }
 
@@ -145,19 +130,28 @@ export default function SkillsMatchGapEngine() {
     } catch (err) {
       console.error("Stripe checkout error (skills):", err);
       alert("Payment could not be started. Please try again.");
-      setPaying(false);
+      setLoading(false);
     }
   }
 
-  async function handlePrimaryClick() {
-    if (!targetRole.trim() || !cvText.trim()) {
+  function redirectToLogin() {
+    saveDraft();
+    const currentUrl =
+      typeof window !== "undefined"
+        ? window.location.href
+        : "/skills-match-gap-engine";
+    router.push(`/login?redirect=${encodeURIComponent(currentUrl)}`);
+  }
+
+  async function handleRunClick() {
+    if (!targetRole.trim() || !cvSnapshot.trim()) {
       alert("Please fill Target role & your CV / skills snapshot.");
       return;
     }
 
     if (hasAccess && hasConsumedRun) {
       alert(
-        "You’ve already used this Skills Match run. To run again, please purchase another single run."
+        "You’ve already used this Skills Gap run. To run again, please purchase another single run."
       );
       return;
     }
@@ -168,13 +162,13 @@ export default function SkillsMatchGapEngine() {
     }
 
     if (hasAccess) {
-      await runSkillsMatch(false);
+      await runSkillsEngine(false);
     } else {
       await goToStripeCheckout();
     }
   }
 
-  // ---------- auth + auto-run ----------
+  // ----- Stripe return + access detection -----
   useEffect(() => {
     if (!router.isReady) return;
     if (authLoading) return;
@@ -190,14 +184,15 @@ export default function SkillsMatchGapEngine() {
         setHasAccess(true);
         restoreDraft();
 
-        runSkillsMatch(true).then(() => {
+        // Auto run once, then clean URL
+        runSkillsEngine(true).then(() => {
           router.replace("/skills", undefined, { shallow: true });
         });
       } else {
         setHasAccess(false);
       }
     } catch (e) {
-      console.warn("Skills auth/Stripe init failed:", e);
+      console.warn("Skills auth / Stripe init failed:", e);
       setHasAccess(false);
     } finally {
       setCheckingAuth(false);
@@ -209,18 +204,16 @@ export default function SkillsMatchGapEngine() {
     : hasAccess && !hasConsumedRun
     ? "View Skills Gap Report"
     : hasAccess && hasConsumedRun
-    ? "Skills Gap run used"
-    : "Pay & View Skills Gap Report (£1.49)";
+    ? "Skills run used"
+    : "Pay & Run Skills Engine (£1.49)";
 
-  const disabled = loading || paying || checkingAuth;
-
+  // ----- shared styles -----
   return (
     <>
-      <AppHeader />
-
       <style jsx global>{`
-        /* === HireEdge – Skills Match & Gap Engine (Polished UI) === */
-
+        body {
+          background: #020617;
+        }
         .he-tool-wrap {
           width: 100%;
           min-height: calc(100vh - 200px);
@@ -239,32 +232,16 @@ export default function SkillsMatchGapEngine() {
           display: flex;
           justify-content: center;
           box-sizing: border-box;
-          font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
-            "Segoe UI", sans-serif;
+          font-family: system-ui, -apple-system, BlinkMacSystemFont,
+            "SF Pro Text", "Segoe UI", sans-serif;
           color: #e5e7eb;
         }
-
         .he-tool-inner {
           width: 100%;
           max-width: 1120px;
           margin: 0 auto;
           padding: 0 24px;
         }
-
-        /* Back link */
-        .he-tool-back a {
-          font-size: 12px;
-          color: #a5b4fc;
-          text-decoration: none;
-        }
-        .he-tool-back a:hover {
-          text-decoration: underline;
-        }
-        .he-tool-back {
-          margin-bottom: 16px;
-        }
-
-        /* Eyebrow chip */
         .he-tool-chip {
           display: inline-flex;
           align-items: center;
@@ -284,8 +261,6 @@ export default function SkillsMatchGapEngine() {
           background: #22c55e;
           box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.35);
         }
-
-        /* Title */
         .he-tool-title {
           font-size: 30px;
           font-weight: 650;
@@ -300,8 +275,6 @@ export default function SkillsMatchGapEngine() {
           color: #9ca3af;
           margin-bottom: 18px;
         }
-
-        /* Bullets */
         .he-tool-bullets {
           list-style: none;
           padding: 0;
@@ -317,8 +290,6 @@ export default function SkillsMatchGapEngine() {
         .he-tool-bullets li span:first-child {
           font-size: 15px;
         }
-
-        /* Pricing tags */
         .he-tool-tags-row {
           display: flex;
           flex-wrap: wrap;
@@ -342,15 +313,11 @@ export default function SkillsMatchGapEngine() {
           border-color: #22c55e;
           color: #bbf7d0;
         }
-
-        /* Layout */
         .he-tool-layout {
           display: grid;
           grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
           gap: 32px;
         }
-
-        /* Form card */
         .he-tool-card {
           border-radius: 22px;
           padding: 22px 22px 20px;
@@ -362,7 +329,6 @@ export default function SkillsMatchGapEngine() {
           box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.55),
             0 28px 70px rgba(0, 0, 0, 0.75);
         }
-
         .he-tool-card-title {
           font-size: 13px;
           letter-spacing: 0.14em;
@@ -375,8 +341,6 @@ export default function SkillsMatchGapEngine() {
           color: #a5b4fc;
           margin-bottom: 12px;
         }
-
-        /* Inputs */
         .he-input-group {
           display: flex;
           flex-direction: column;
@@ -408,8 +372,6 @@ export default function SkillsMatchGapEngine() {
           border-color: #38bdf8;
           box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.7);
         }
-
-        /* CTA button */
         .he-primary-btn {
           width: 100%;
           padding: 11px 16px;
@@ -428,9 +390,6 @@ export default function SkillsMatchGapEngine() {
           box-shadow: 0 0 0 1px rgba(191, 219, 254, 0.7),
             0 26px 48px rgba(37, 99, 235, 0.6);
         }
-        .he-primary-btn:hover {
-          filter: brightness(1.07);
-        }
         .he-primary-btn:disabled {
           opacity: 0.6;
           cursor: not-allowed;
@@ -440,8 +399,6 @@ export default function SkillsMatchGapEngine() {
           font-size: 11px;
           color: #cbd5f5;
         }
-
-        /* Overview card (static right side) */
         .he-overview-card {
           border-radius: 22px;
           padding: 22px 22px 20px;
@@ -491,13 +448,9 @@ export default function SkillsMatchGapEngine() {
         .he-overview-list li {
           margin-bottom: 5px;
         }
-
-        /* === RESULTS AREA === */
-
         .he-results {
           margin-top: 18px;
         }
-
         .he-results-card {
           border-radius: 18px;
           padding: 16px 16px 14px;
@@ -506,32 +459,27 @@ export default function SkillsMatchGapEngine() {
           box-shadow: 0 18px 40px rgba(15, 23, 42, 0.9);
           font-size: 12px;
         }
-
         .he-results-heading {
           font-size: 13px;
           font-weight: 600;
           margin-bottom: 6px;
         }
-
         .he-results-score {
           font-size: 22px;
           font-weight: 650;
           margin-bottom: 4px;
         }
-
         .he-results-grid {
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 10px;
           margin-top: 10px;
         }
-
         .he-results-col {
           border-radius: 12px;
           padding: 10px 11px 9px;
           background: rgba(15, 23, 42, 0.96);
         }
-
         .he-results-col-title {
           font-size: 11px;
           font-weight: 600;
@@ -539,7 +487,6 @@ export default function SkillsMatchGapEngine() {
           letter-spacing: 0.12em;
           margin-bottom: 6px;
         }
-
         .he-results-col-title--good {
           color: #bbf7d0;
         }
@@ -549,7 +496,6 @@ export default function SkillsMatchGapEngine() {
         .he-results-col-title--bad {
           color: #fecaca;
         }
-
         .he-results-list {
           list-style: disc;
           padding-left: 16px;
@@ -559,35 +505,52 @@ export default function SkillsMatchGapEngine() {
           margin-bottom: 4px;
           font-size: 12px;
         }
-
-        /* Learning plan list */
         .he-learning-list {
           margin-top: 12px;
           display: flex;
           flex-direction: column;
           gap: 8px;
         }
-
         .he-learning-item {
           border-radius: 12px;
           padding: 10px 11px 9px;
           background: rgba(15, 23, 42, 0.96);
           border: 1px solid rgba(148, 163, 184, 0.4);
         }
-
         .he-learning-skill {
           font-size: 12px;
           font-weight: 600;
           margin-bottom: 4px;
         }
-
         .he-learning-actions {
           list-style: disc;
           padding-left: 16px;
           margin: 0;
           font-size: 12px;
         }
-
+        .he-login-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 4px 10px;
+          border-radius: 999px;
+          font-size: 11px;
+          margin-bottom: 12px;
+        }
+        .he-login-pill--logged-in {
+          background: rgba(22, 163, 74, 0.15);
+          border: 1px solid rgba(22, 163, 74, 0.7);
+          color: #bbf7d0;
+        }
+        .he-login-pill--logged-out {
+          background: rgba(30, 64, 175, 0.25);
+          border: 1px solid rgba(59, 130, 246, 0.7);
+          color: #bfdbfe;
+          cursor: pointer;
+        }
+        .he-login-pill-email {
+          color: #e5e7eb;
+        }
         @media (max-width: 991px) {
           .he-tool-layout {
             grid-template-columns: 1fr;
@@ -608,30 +571,29 @@ export default function SkillsMatchGapEngine() {
 
       <section className="he-tool-wrap">
         <div className="he-tool-inner">
-          <div className="he-tool-back">
-            <a href="https://hireedge.co.uk/9-ai-engines">
-              ← Back to 9 AI Micro Engines
-            </a>
-          </div>
-
           <div className="he-tool-chip">
-            <span />
-            AI MICRO ENGINE • SKILLS MATCH &amp; GAP
+            <span /> AI MICRO ENGINE • SKILLS MATCH &amp; GAP
           </div>
 
-          {/* optional login status small pill under chip */}
-          {!checkingAuth && (
+          {/* login pill */}
+          {checkingAuth ? (
+            <div className="he-login-pill he-login-pill--logged-out">
+              Checking your account…
+            </div>
+          ) : isLoggedIn ? (
+            <div className="he-login-pill he-login-pill--logged-in">
+              <span>Signed in</span>
+              {userEmail && (
+                <span className="he-login-pill-email">{userEmail}</span>
+              )}
+            </div>
+          ) : (
             <div
-              style={{
-                marginTop: 8,
-                marginBottom: 8,
-                fontSize: 11,
-                color: isLoggedIn ? "#bbf7d0" : "#bfdbfe",
-              }}
+              className="he-login-pill he-login-pill--logged-out"
+              onClick={redirectToLogin}
             >
-              {isLoggedIn
-                ? `Signed in as ${userEmail}`
-                : "Not signed in – we’ll ask you to log in before payment."}
+              <span>Not signed in</span>
+              <span>Click to log in or create an account.</span>
             </div>
           )}
 
@@ -648,13 +610,13 @@ export default function SkillsMatchGapEngine() {
             </li>
             <li>
               <span>🧩</span>
-              <span>
-                See strengths, weak areas, and missing skills instantly.
-              </span>
+              <span>See strengths, weak areas, and missing skills instantly.</span>
             </li>
             <li>
               <span>🪜</span>
-              <span>Auto-generate an action plan for the next 3–12 months.</span>
+              <span>
+                Auto-generate an action plan for the next 3–12 months.
+              </span>
             </li>
           </ul>
 
@@ -664,15 +626,10 @@ export default function SkillsMatchGapEngine() {
               Included in Career Pro &amp; Career Elite
             </div>
             <div className="he-tag-pill">Part of the AI Builder Career Pack</div>
-            {hasAccess && !hasConsumedRun && (
-              <div className="he-tag-pill he-tag-pill--accent">
-                Payment confirmed — you can run the engine now
-              </div>
-            )}
           </div>
 
           <div className="he-tool-layout">
-            {/* LEFT: form + results */}
+            {/* LEFT */}
             <div>
               <div className="he-tool-card">
                 <div className="he-tool-card-title">Paste your inputs</div>
@@ -681,12 +638,11 @@ export default function SkillsMatchGapEngine() {
                 </div>
 
                 <div className="he-input-group">
-                  <label className="he-input-label" htmlFor="he-skills-role">
+                  <label className="he-input-label">
                     Target role &amp; level
                     <span>e.g., Export Sales Manager — UK &amp; Europe</span>
                   </label>
                   <textarea
-                    id="he-skills-role"
                     className="he-textarea"
                     placeholder="Describe the role you’re aiming for..."
                     value={targetRole}
@@ -695,26 +651,24 @@ export default function SkillsMatchGapEngine() {
                 </div>
 
                 <div className="he-input-group">
-                  <label className="he-input-label" htmlFor="he-skills-cv">
+                  <label className="he-input-label">
                     Your CV / skills snapshot
                     <span>Paste from CV or LinkedIn</span>
                   </label>
                   <textarea
-                    id="he-skills-cv"
                     className="he-textarea"
                     placeholder="Experience, skills, tools, certifications..."
-                    value={cvText}
-                    onChange={(e) => setCvText(e.target.value)}
+                    value={cvSnapshot}
+                    onChange={(e) => setCvSnapshot(e.target.value)}
                   />
                 </div>
 
                 <div className="he-input-group">
-                  <label className="he-input-label" htmlFor="he-skills-jd">
+                  <label className="he-input-label">
                     Job description (optional)
                     <span>Paste the full job ad if available</span>
                   </label>
                   <textarea
-                    id="he-skills-jd"
                     className="he-textarea"
                     placeholder="Paste full job description..."
                     value={jobDescription}
@@ -725,22 +679,22 @@ export default function SkillsMatchGapEngine() {
                 <button
                   type="button"
                   className="he-primary-btn"
-                  onClick={handlePrimaryClick}
-                  disabled={disabled}
+                  onClick={handleRunClick}
+                  disabled={loading || checkingAuth}
                 >
                   {buttonLabel}
                 </button>
 
                 <div className="he-tool-helper">
                   {hasAccess && !hasConsumedRun
-                    ? "Payment confirmed. Paste your details and run your Skills Match report."
+                    ? "Payment confirmed. Paste your details and run your Skills Match & Gap report."
                     : hasAccess && hasConsumedRun
-                    ? "You’ve used this Skills Match run. To run again, please purchase another single run."
-                    : "This sends your inputs to the Skills Match & Gap Engine and returns match %, strengths, gaps and a learning plan. We’ll guide you through login and secure payment first."}
+                    ? "You’ve used this Skills run. To run again, please purchase another single run."
+                    : "Paste your target role + CV snapshot. We’ll guide you to log in and pay securely before running the engine."}
                 </div>
               </div>
 
-              {hasResults && (
+              {resultsVisible && (
                 <div className="he-results">
                   <div className="he-results-card" style={{ marginTop: 14 }}>
                     <div className="he-results-heading">Overall Fit</div>
@@ -752,10 +706,7 @@ export default function SkillsMatchGapEngine() {
                     <div>{gapSummary}</div>
                   </div>
 
-                  <div
-                    className="he-results-grid"
-                    style={{ marginTop: 10 }}
-                  >
+                  <div className="he-results-grid" style={{ marginTop: 10 }}>
                     <div className="he-results-col">
                       <div className="he-results-col-title he-results-col-title--good">
                         Matched Skills
@@ -764,7 +715,7 @@ export default function SkillsMatchGapEngine() {
                         {(matchedSkills || []).length ? (
                           matchedSkills.map((s, i) => <li key={i}>{s}</li>)
                         ) : (
-                          <li>None</li>
+                          <li>None detected yet.</li>
                         )}
                       </ul>
                     </div>
@@ -776,7 +727,7 @@ export default function SkillsMatchGapEngine() {
                         {(partialSkills || []).length ? (
                           partialSkills.map((s, i) => <li key={i}>{s}</li>)
                         ) : (
-                          <li>None</li>
+                          <li>No partial matches yet.</li>
                         )}
                       </ul>
                     </div>
@@ -788,16 +739,13 @@ export default function SkillsMatchGapEngine() {
                         {(missingSkills || []).length ? (
                           missingSkills.map((s, i) => <li key={i}>{s}</li>)
                         ) : (
-                          <li>None</li>
+                          <li>No clear gaps identified.</li>
                         )}
                       </ul>
                     </div>
                   </div>
 
-                  <div
-                    className="he-results-card"
-                    style={{ marginTop: 10 }}
-                  >
+                  <div className="he-results-card" style={{ marginTop: 10 }}>
                     <div className="he-results-heading">
                       Learning Plan to Close Gaps
                     </div>
@@ -809,8 +757,8 @@ export default function SkillsMatchGapEngine() {
                               {entry.skill || "Skill focus"}
                             </div>
                             <ul className="he-learning-actions">
-                              {(entry.actions || []).map((act, j) => (
-                                <li key={j}>{act}</li>
+                              {(entry.actions || []).map((a, j) => (
+                                <li key={j}>{a}</li>
                               ))}
                             </ul>
                           </div>
@@ -826,7 +774,7 @@ export default function SkillsMatchGapEngine() {
               )}
             </div>
 
-            {/* RIGHT: static overview */}
+            {/* RIGHT overview */}
             <aside className="he-overview-card">
               <div className="he-overview-title">Engine Overview</div>
               <div className="he-overview-section-title">
@@ -844,7 +792,6 @@ export default function SkillsMatchGapEngine() {
                     Understanding short-term vs long-term fit.
                   </div>
                 </div>
-
                 <div>
                   <div className="he-overview-col-title">Inputs</div>
                   <div className="he-overview-col-body">
