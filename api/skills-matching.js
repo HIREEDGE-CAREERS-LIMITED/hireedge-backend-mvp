@@ -10,17 +10,23 @@ export default function SkillsGapPage() {
   const router = useRouter();
   const { user, loading: authLoading } = useAuth();
 
+  // Inputs
   const [targetRole, setTargetRole] = useState("");
   const [cvSnapshot, setCvSnapshot] = useState("");
   const [jobDescription, setJobDescription] = useState("");
 
+  // Auth / payment
   const [hasAccess, setHasAccess] = useState(false);
   const [hasConsumedRun, setHasConsumedRun] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const isLoggedIn = !!user;
+  const userEmail = user?.email || "";
 
+  // UI state
   const [loading, setLoading] = useState(false);
-  const [resultsVisible, setResultsVisible] = useState(false);
 
+  // Results
+  const [hasResults, setHasResults] = useState(false);
   const [overallFit, setOverallFit] = useState(null);
   const [gapSummary, setGapSummary] = useState(
     "Paste a job and CV to see your overall fit summary here."
@@ -30,10 +36,7 @@ export default function SkillsGapPage() {
   const [missingSkills, setMissingSkills] = useState([]);
   const [learningPlan, setLearningPlan] = useState([]);
 
-  const isLoggedIn = !!user;
-  const userEmail = user?.email || "";
-
-  // ----- draft helpers -----
+  // -------- Draft helpers --------
   function saveDraft() {
     if (typeof window === "undefined") return;
     try {
@@ -49,19 +52,24 @@ export default function SkillsGapPage() {
     try {
       const raw = window.localStorage.getItem("he-skills-draft");
       if (!raw) return;
-      const d = JSON.parse(raw);
-      if (d.targetRole) setTargetRole(d.targetRole);
-      if (d.cvSnapshot) setCvSnapshot(d.cvSnapshot);
-      if (d.jobDescription) setJobDescription(d.jobDescription);
+      const draft = JSON.parse(raw);
+      if (draft.targetRole) setTargetRole(draft.targetRole);
+      if (draft.cvSnapshot) setCvSnapshot(draft.cvSnapshot);
+      if (draft.jobDescription) setJobDescription(draft.jobDescription);
     } catch (e) {
       console.warn("Skills draft restore failed:", e);
     }
   }
 
+  // -------- Engine run --------
   async function runSkillsEngine(isAuto = false) {
-    if (!targetRole.trim() || !cvSnapshot.trim()) {
+    const targetRoleClean = targetRole.trim();
+    const cvClean = cvSnapshot.trim();
+    const jdClean = jobDescription.trim();
+
+    if (!targetRoleClean || !cvClean) {
       if (!isAuto) {
-        alert("Please fill Target role & your CV / skills snapshot.");
+        alert("Please fill both Target role and your CV / skills snapshot.");
       }
       return;
     }
@@ -72,23 +80,22 @@ export default function SkillsGapPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          targetRole: targetRole.trim(),
-          cvText: cvSnapshot.trim(),
-          jobDescription: jobDescription.trim(),
+          jobDescription: jdClean,
+          cvText: cvClean,
+          targetRole: targetRoleClean,
         }),
       });
 
       const data = await res.json();
-      console.log("Skills engine result:", data);
+      console.log("Skills Match Result:", data);
 
       if (!data.ok) {
         alert(data.error || "Something went wrong. Please try again.");
         return;
       }
 
-      setResultsVisible(true);
-      const fit = data.overallFit ?? null;
-      setOverallFit(fit);
+      setHasResults(true);
+      setOverallFit(data.overallFit ?? null);
       setGapSummary(
         data.gapSummary ||
           "The engine has analysed your skills vs the target role and highlighted matched, partial and missing skills below."
@@ -98,7 +105,9 @@ export default function SkillsGapPage() {
       setMissingSkills(data.missingSkills || []);
       setLearningPlan(data.learningPlan || []);
 
-      if (hasAccess) setHasConsumedRun(true);
+      if (hasAccess) {
+        setHasConsumedRun(true);
+      }
     } catch (err) {
       console.error("Skills engine network error:", err);
       alert("Network error – please try again.");
@@ -107,6 +116,7 @@ export default function SkillsGapPage() {
     }
   }
 
+  // -------- Stripe checkout --------
   async function goToStripeCheckout() {
     saveDraft();
     setLoading(true);
@@ -114,11 +124,11 @@ export default function SkillsGapPage() {
       const res = await fetch(CHECKOUT_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ engineId: "skills" }),
+        body: JSON.stringify({ plan: "skills", engineId: "skills" }),
       });
 
       const data = await res.json();
-      console.log("Stripe skills session:", data);
+      console.log("Stripe session (skills):", data);
 
       if (!data.ok || !data.url) {
         alert(data.error || "Unable to start payment. Please try again.");
@@ -145,13 +155,13 @@ export default function SkillsGapPage() {
 
   async function handleRunClick() {
     if (!targetRole.trim() || !cvSnapshot.trim()) {
-      alert("Please fill Target role & your CV / skills snapshot.");
+      alert("Please fill both Target role and your CV / skills snapshot.");
       return;
     }
 
     if (hasAccess && hasConsumedRun) {
       alert(
-        "You’ve already used this Skills Gap run. To run again, please purchase another single run."
+        "You’ve already used this Skills Match run. To run again, please purchase another single run."
       );
       return;
     }
@@ -168,7 +178,7 @@ export default function SkillsGapPage() {
     }
   }
 
-  // ----- Stripe return + access detection -----
+  // -------- Auth + auto-run on Stripe return --------
   useEffect(() => {
     if (!router.isReady) return;
     if (authLoading) return;
@@ -183,16 +193,17 @@ export default function SkillsGapPage() {
       if (isLoggedIn && paidParam) {
         setHasAccess(true);
         restoreDraft();
-
-        // Auto run once, then clean URL
+        // Auto-run one time, then clean URL
         runSkillsEngine(true).then(() => {
-          router.replace("/skills", undefined, { shallow: true });
+          router.replace("/skills-match-gap-engine", undefined, {
+            shallow: true,
+          });
         });
       } else {
         setHasAccess(false);
       }
     } catch (e) {
-      console.warn("Skills auth / Stripe init failed:", e);
+      console.warn("Skills auth/Stripe init failed:", e);
       setHasAccess(false);
     } finally {
       setCheckingAuth(false);
@@ -200,20 +211,21 @@ export default function SkillsGapPage() {
   }, [router.isReady, authLoading, isLoggedIn]);
 
   const buttonLabel = loading
-    ? "Running…"
+    ? "Please wait…"
     : hasAccess && !hasConsumedRun
-    ? "View Skills Gap Report"
+    ? "Run Skills Engine"
     : hasAccess && hasConsumedRun
     ? "Skills run used"
     : "Pay & Run Skills Engine (£1.49)";
 
-  // ----- shared styles -----
+  // -------- UI --------
   return (
     <>
       <style jsx global>{`
         body {
           background: #020617;
         }
+
         .he-tool-wrap {
           width: 100%;
           min-height: calc(100vh - 200px);
@@ -236,12 +248,26 @@ export default function SkillsGapPage() {
             "SF Pro Text", "Segoe UI", sans-serif;
           color: #e5e7eb;
         }
+
         .he-tool-inner {
           width: 100%;
           max-width: 1120px;
           margin: 0 auto;
           padding: 0 24px;
         }
+
+        .he-tool-back {
+          margin-bottom: 16px;
+          font-size: 12px;
+        }
+        .he-tool-back a {
+          color: #a5b4fc;
+          text-decoration: none;
+        }
+        .he-tool-back a:hover {
+          text-decoration: underline;
+        }
+
         .he-tool-chip {
           display: inline-flex;
           align-items: center;
@@ -261,11 +287,39 @@ export default function SkillsGapPage() {
           background: #22c55e;
           box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.35);
         }
+
+        .he-login-pill {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 4px 10px;
+          border-radius: 999px;
+          font-size: 11px;
+          margin-bottom: 12px;
+        }
+        .he-login-pill--in {
+          background: rgba(22, 163, 74, 0.2);
+          border: 1px solid rgba(22, 163, 74, 0.7);
+          color: #bbf7d0;
+        }
+        .he-login-pill--out {
+          background: rgba(30, 64, 175, 0.25);
+          border: 1px solid rgba(59, 130, 246, 0.7);
+          color: #bfdbfe;
+          cursor: pointer;
+        }
+        .he-login-pill-label {
+          font-weight: 500;
+        }
+        .he-login-pill-email {
+          color: #e5e7eb;
+        }
+
         .he-tool-title {
           font-size: 30px;
           font-weight: 650;
           line-height: 1.2;
-          margin-bottom: 10px;
+          margin-bottom: 8px;
           letter-spacing: -0.03em;
         }
         .he-tool-subtitle {
@@ -275,6 +329,7 @@ export default function SkillsGapPage() {
           color: #9ca3af;
           margin-bottom: 18px;
         }
+
         .he-tool-bullets {
           list-style: none;
           padding: 0;
@@ -290,6 +345,7 @@ export default function SkillsGapPage() {
         .he-tool-bullets li span:first-child {
           font-size: 15px;
         }
+
         .he-tool-tags-row {
           display: flex;
           flex-wrap: wrap;
@@ -313,11 +369,13 @@ export default function SkillsGapPage() {
           border-color: #22c55e;
           color: #bbf7d0;
         }
+
         .he-tool-layout {
           display: grid;
           grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
           gap: 32px;
         }
+
         .he-tool-card {
           border-radius: 22px;
           padding: 22px 22px 20px;
@@ -329,6 +387,7 @@ export default function SkillsGapPage() {
           box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.55),
             0 28px 70px rgba(0, 0, 0, 0.75);
         }
+
         .he-tool-card-title {
           font-size: 13px;
           letter-spacing: 0.14em;
@@ -341,39 +400,50 @@ export default function SkillsGapPage() {
           color: #a5b4fc;
           margin-bottom: 12px;
         }
+
         .he-input-group {
           display: flex;
           flex-direction: column;
-          gap: 4px;
           margin-bottom: 12px;
         }
         .he-input-label {
           font-size: 12px;
           display: flex;
           justify-content: space-between;
+          align-items: center;
           color: #e5e7eb;
+          gap: 12px;
         }
         .he-input-label span {
           font-size: 11px;
           color: #9ca3af;
+          white-space: nowrap;
         }
+
         .he-textarea {
           width: 100%;
-          min-height: 92px;
-          border-radius: 12px;
+          min-height: 96px;
+          margin-top: 4px;
+          border-radius: 14px;
           border: 1px solid rgba(191, 219, 254, 0.6);
           background: rgba(15, 23, 42, 0.96);
           color: #eef2ff;
           font-size: 13px;
-          padding: 9px 10px;
+          padding: 10px 12px;
           resize: vertical;
+          outline: none;
+        }
+        .he-textarea::placeholder {
+          color: #6b7280;
         }
         .he-textarea:focus {
           border-color: #38bdf8;
           box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.7);
         }
+
         .he-primary-btn {
           width: 100%;
+          margin-top: 6px;
           padding: 11px 16px;
           border-radius: 999px;
           border: none;
@@ -390,15 +460,20 @@ export default function SkillsGapPage() {
           box-shadow: 0 0 0 1px rgba(191, 219, 254, 0.7),
             0 26px 48px rgba(37, 99, 235, 0.6);
         }
+        .he-primary-btn:hover {
+          filter: brightness(1.07);
+        }
         .he-primary-btn:disabled {
           opacity: 0.6;
           cursor: not-allowed;
         }
+
         .he-tool-helper {
           margin-top: 6px;
           font-size: 11px;
           color: #cbd5f5;
         }
+
         .he-overview-card {
           border-radius: 22px;
           padding: 22px 22px 20px;
@@ -448,8 +523,10 @@ export default function SkillsGapPage() {
         .he-overview-list li {
           margin-bottom: 5px;
         }
+
         .he-results {
           margin-top: 18px;
+          display: ${hasResults ? "block" : "none"};
         }
         .he-results-card {
           border-radius: 18px;
@@ -458,6 +535,7 @@ export default function SkillsGapPage() {
           border: 1px solid rgba(148, 163, 184, 0.6);
           box-shadow: 0 18px 40px rgba(15, 23, 42, 0.9);
           font-size: 12px;
+          margin-top: 14px;
         }
         .he-results-heading {
           font-size: 13px;
@@ -505,6 +583,7 @@ export default function SkillsGapPage() {
           margin-bottom: 4px;
           font-size: 12px;
         }
+
         .he-learning-list {
           margin-top: 12px;
           display: flex;
@@ -528,29 +607,7 @@ export default function SkillsGapPage() {
           margin: 0;
           font-size: 12px;
         }
-        .he-login-pill {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          padding: 4px 10px;
-          border-radius: 999px;
-          font-size: 11px;
-          margin-bottom: 12px;
-        }
-        .he-login-pill--logged-in {
-          background: rgba(22, 163, 74, 0.15);
-          border: 1px solid rgba(22, 163, 74, 0.7);
-          color: #bbf7d0;
-        }
-        .he-login-pill--logged-out {
-          background: rgba(30, 64, 175, 0.25);
-          border: 1px solid rgba(59, 130, 246, 0.7);
-          color: #bfdbfe;
-          cursor: pointer;
-        }
-        .he-login-pill-email {
-          color: #e5e7eb;
-        }
+
         @media (max-width: 991px) {
           .he-tool-layout {
             grid-template-columns: 1fr;
@@ -571,29 +628,34 @@ export default function SkillsGapPage() {
 
       <section className="he-tool-wrap">
         <div className="he-tool-inner">
-          <div className="he-tool-chip">
-            <span /> AI MICRO ENGINE • SKILLS MATCH &amp; GAP
+          <div className="he-tool-back">
+            <a href="/9-ai-engines">← Back to 9 AI Micro Engines</a>
           </div>
 
-          {/* login pill */}
+          <div className="he-tool-chip">
+            <span />
+            AI MICRO ENGINE • SKILLS MATCH &amp; GAP
+          </div>
+
+          {/* Login pill */}
           {checkingAuth ? (
-            <div className="he-login-pill he-login-pill--logged-out">
+            <div className="he-login-pill he-login-pill--out">
               Checking your account…
             </div>
           ) : isLoggedIn ? (
-            <div className="he-login-pill he-login-pill--logged-in">
-              <span>Signed in</span>
+            <div className="he-login-pill he-login-pill--in">
+              <span className="he-login-pill-label">Signed in</span>
               {userEmail && (
                 <span className="he-login-pill-email">{userEmail}</span>
               )}
             </div>
           ) : (
             <div
-              className="he-login-pill he-login-pill--logged-out"
+              className="he-login-pill he-login-pill--out"
               onClick={redirectToLogin}
             >
-              <span>Not signed in</span>
-              <span>Click to log in or create an account.</span>
+              <span className="he-login-pill-label">Not signed in</span>
+              <span>Click here to log in or create an account.</span>
             </div>
           )}
 
@@ -614,9 +676,7 @@ export default function SkillsGapPage() {
             </li>
             <li>
               <span>🪜</span>
-              <span>
-                Auto-generate an action plan for the next 3–12 months.
-              </span>
+              <span>Auto-generate an action plan for the next 3–12 months.</span>
             </li>
           </ul>
 
@@ -629,7 +689,7 @@ export default function SkillsGapPage() {
           </div>
 
           <div className="he-tool-layout">
-            {/* LEFT */}
+            {/* LEFT: form + results */}
             <div>
               <div className="he-tool-card">
                 <div className="he-tool-card-title">Paste your inputs</div>
@@ -638,11 +698,12 @@ export default function SkillsGapPage() {
                 </div>
 
                 <div className="he-input-group">
-                  <label className="he-input-label">
+                  <label className="he-input-label" htmlFor="target-role">
                     Target role &amp; level
                     <span>e.g., Export Sales Manager — UK &amp; Europe</span>
                   </label>
                   <textarea
+                    id="target-role"
                     className="he-textarea"
                     placeholder="Describe the role you’re aiming for..."
                     value={targetRole}
@@ -651,11 +712,12 @@ export default function SkillsGapPage() {
                 </div>
 
                 <div className="he-input-group">
-                  <label className="he-input-label">
+                  <label className="he-input-label" htmlFor="cv-snapshot">
                     Your CV / skills snapshot
                     <span>Paste from CV or LinkedIn</span>
                   </label>
                   <textarea
+                    id="cv-snapshot"
                     className="he-textarea"
                     placeholder="Experience, skills, tools, certifications..."
                     value={cvSnapshot}
@@ -664,11 +726,12 @@ export default function SkillsGapPage() {
                 </div>
 
                 <div className="he-input-group">
-                  <label className="he-input-label">
+                  <label className="he-input-label" htmlFor="jd">
                     Job description (optional)
                     <span>Paste the full job ad if available</span>
                   </label>
                   <textarea
+                    id="jd"
                     className="he-textarea"
                     placeholder="Paste full job description..."
                     value={jobDescription}
@@ -687,94 +750,95 @@ export default function SkillsGapPage() {
 
                 <div className="he-tool-helper">
                   {hasAccess && !hasConsumedRun
-                    ? "Payment confirmed. Paste your details and run your Skills Match & Gap report."
+                    ? "Payment confirmed. Paste your details and run the Skills Engine."
                     : hasAccess && hasConsumedRun
                     ? "You’ve used this Skills run. To run again, please purchase another single run."
-                    : "Paste your target role + CV snapshot. We’ll guide you to log in and pay securely before running the engine."}
+                    : "Paste your job description + CV. We’ll guide you to log in and pay securely before running the check."}
                 </div>
               </div>
 
-              {resultsVisible && (
-                <div className="he-results">
-                  <div className="he-results-card" style={{ marginTop: 14 }}>
-                    <div className="he-results-heading">Overall Fit</div>
-                    <div className="he-results-score">
-                      {overallFit !== null
-                        ? `${overallFit}% skills match`
-                        : "Skills match unavailable"}
-                    </div>
-                    <div>{gapSummary}</div>
+              {/* RESULTS */}
+              <div className="he-results">
+                <div className="he-results-card">
+                  <div className="he-results-heading">Overall Fit</div>
+                  <div className="he-results-score">
+                    {overallFit !== null
+                      ? `${overallFit}% skills match`
+                      : "Skills match unavailable"}
                   </div>
+                  <div>{gapSummary}</div>
+                </div>
 
-                  <div className="he-results-grid" style={{ marginTop: 10 }}>
-                    <div className="he-results-col">
-                      <div className="he-results-col-title he-results-col-title--good">
-                        Matched Skills
-                      </div>
-                      <ul className="he-results-list">
-                        {(matchedSkills || []).length ? (
-                          matchedSkills.map((s, i) => <li key={i}>{s}</li>)
-                        ) : (
-                          <li>None detected yet.</li>
-                        )}
-                      </ul>
+                <div className="he-results-grid">
+                  <div className="he-results-col">
+                    <div className="he-results-col-title he-results-col-title--good">
+                      Matched Skills
                     </div>
-                    <div className="he-results-col">
-                      <div className="he-results-col-title he-results-col-title--mid">
-                        Partially Matched
-                      </div>
-                      <ul className="he-results-list">
-                        {(partialSkills || []).length ? (
-                          partialSkills.map((s, i) => <li key={i}>{s}</li>)
-                        ) : (
-                          <li>No partial matches yet.</li>
-                        )}
-                      </ul>
-                    </div>
-                    <div className="he-results-col">
-                      <div className="he-results-col-title he-results-col-title--bad">
-                        Missing Skills
-                      </div>
-                      <ul className="he-results-list">
-                        {(missingSkills || []).length ? (
-                          missingSkills.map((s, i) => <li key={i}>{s}</li>)
-                        ) : (
-                          <li>No clear gaps identified.</li>
-                        )}
-                      </ul>
-                    </div>
-                  </div>
-
-                  <div className="he-results-card" style={{ marginTop: 10 }}>
-                    <div className="he-results-heading">
-                      Learning Plan to Close Gaps
-                    </div>
-                    <div className="he-learning-list">
-                      {(learningPlan || []).length ? (
-                        learningPlan.map((entry, i) => (
-                          <div key={i} className="he-learning-item">
-                            <div className="he-learning-skill">
-                              {entry.skill || "Skill focus"}
-                            </div>
-                            <ul className="he-learning-actions">
-                              {(entry.actions || []).map((a, j) => (
-                                <li key={j}>{a}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        ))
+                    <ul className="he-results-list">
+                      {(matchedSkills || []).length ? (
+                        matchedSkills.map((s, i) => <li key={i}>{s}</li>)
                       ) : (
-                        <div>
-                          No specific learning actions generated for this run.
-                        </div>
+                        <li>None</li>
                       )}
+                    </ul>
+                  </div>
+
+                  <div className="he-results-col">
+                    <div className="he-results-col-title he-results-col-title--mid">
+                      Partially Matched
                     </div>
+                    <ul className="he-results-list">
+                      {(partialSkills || []).length ? (
+                        partialSkills.map((s, i) => <li key={i}>{s}</li>)
+                      ) : (
+                        <li>None</li>
+                      )}
+                    </ul>
+                  </div>
+
+                  <div className="he-results-col">
+                    <div className="he-results-col-title he-results-col-title--bad">
+                      Missing Skills
+                    </div>
+                    <ul className="he-results-list">
+                      {(missingSkills || []).length ? (
+                        missingSkills.map((s, i) => <li key={i}>{s}</li>)
+                      ) : (
+                        <li>None</li>
+                      )}
+                    </ul>
                   </div>
                 </div>
-              )}
+
+                <div className="he-results-card">
+                  <div className="he-results-heading">
+                    Learning Plan to Close Gaps
+                  </div>
+                  <div className="he-learning-list">
+                    {(learningPlan || []).length ? (
+                      learningPlan.map((entry, idx) => (
+                        <div key={idx} className="he-learning-item">
+                          <div className="he-learning-skill">
+                            {entry.skill || "Skill focus"}
+                          </div>
+                          <ul className="he-learning-actions">
+                            {(entry.actions || []).map((act, j) => (
+                              <li key={j}>{act}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))
+                    ) : (
+                      <div>
+                        No specific learning actions generated for this run.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
 
-            {/* RIGHT overview */}
+            {/* RIGHT: static overview */}
             <aside className="he-overview-card">
               <div className="he-overview-title">Engine Overview</div>
               <div className="he-overview-section-title">
@@ -792,6 +856,7 @@ export default function SkillsGapPage() {
                     Understanding short-term vs long-term fit.
                   </div>
                 </div>
+
                 <div>
                   <div className="he-overview-col-title">Inputs</div>
                   <div className="he-overview-col-body">
