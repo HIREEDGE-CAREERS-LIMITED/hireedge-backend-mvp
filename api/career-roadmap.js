@@ -1,7 +1,6 @@
 // /pages/api/career-roadmap.js (backend repo)
 import OpenAI from "openai";
 
-// ✅ Allow both your Webflow + Vercel sites + localhost
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",
   "https://hireedge-2d4baa.webflow.io",
@@ -12,58 +11,75 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ✅ CORS helper
 function applyCors(req, res) {
   const origin = req.headers.origin;
 
-  // Only reflect allowed origins
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
-
-  // Important for caches when reflecting Origin
   res.setHeader("Vary", "Origin");
-
-  // Methods + headers (✅ include Authorization)
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
-  );
-
-  // Optional but good
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-export default async function handler(req, res) {
-  // ----- CORS -----
-  applyCors(req, res);
-
-  // ✅ handle preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
+function stripCodeFences(s = "") {
+  let text = String(s || "").trim();
+  if (text.startsWith("```")) {
+    text = text.replace(/^```[a-zA-Z]*\n?/, "").replace(/```\s*$/, "").trim();
   }
-  // ----- END CORS -----
+  return text;
+}
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+function safeJsonParse(text) {
+  const cleaned = stripCodeFences(text);
 
   try {
-    const {
-      currentRole = "Not provided",
-      targetRole = "Not provided",
-      skills = [],
-      experienceYears = "Not provided",
-    } = req.body || {};
+    return { ok: true, value: JSON.parse(cleaned) };
+  } catch {}
+
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (match?.[0]) {
+    try {
+      return { ok: true, value: JSON.parse(match[0]) };
+    } catch {}
+  }
+
+  return { ok: false, rawText: cleaned };
+}
+
+export default async function handler(req, res) {
+  applyCors(req, res);
+
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST")
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+
+  try {
+    const body = req.body || {};
+
+    const currentRole = body.currentRole || "Not provided";
+    const targetRole = body.targetRole || "Not provided";
+    const skills = Array.isArray(body.skills) ? body.skills : [];
+    const experienceYears =
+      body.experienceYears ?? body.yearsExperience ?? "Not provided";
 
     const systemPrompt = `
 You are the "HireEdge Career Roadmap Engine".
-Return JSON ONLY with this structure:
+
+Return JSON ONLY (no markdown, no explanations) with this structure:
 
 {
   "summary": string,
   "timeframe_months": number,
+  "monthly_progression_plan": [
+    { "month": number, "focus": string, "milestones": string[], "outputs": string[] }
+  ],
+  "skills_to_build_in_order": string[],
+  "projects_to_prove_capability": [
+    { "name": string, "description": string, "deliverables": string[], "difficulty": "easy"|"medium"|"hard" }
+  ],
+  "milestones_to_stay_on_track": string[],
   "stages": [
     {
       "name": string,
@@ -78,14 +94,21 @@ Return JSON ONLY with this structure:
   "target_roles": string[]
 }
 
-NO explanations. NO markdown. JSON ONLY.
+Rules:
+- timeframe_months must be 12 or 18
+- monthly_progression_plan must cover EVERY month (length = timeframe_months)
+- skills_to_build_in_order must have 12–20 items, ordered
+- projects_to_prove_capability must have 4–8 projects
+- milestones_to_stay_on_track must have 8–15 items
+- stages must have 4–7 stages
+JSON ONLY.
 `.trim();
 
     const userPrompt = `
 Current role: ${currentRole}
 Target role: ${targetRole}
 Experience (years): ${experienceYears}
-Current skills: ${Array.isArray(skills) ? skills.join(", ") : skills}
+Current skills: ${skills.join(", ")}
 `.trim();
 
     const response = await client.responses.create({
@@ -96,42 +119,20 @@ Current skills: ${Array.isArray(skills) ? skills.join(", ") : skills}
       ],
     });
 
-    // -------- Parse AI output safely --------
-    let text = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
+    const text = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
+    const parsed = safeJsonParse(text);
 
-    // Remove ```json fencing if present
-    if (text.startsWith("```")) {
-      text = text.replace(/^```[a-zA-Z]*\n?/, "").replace(/```\s*$/, "");
+    if (!parsed.ok) {
+      return res.status(200).json({
+        ok: false,
+        error: "Failed to parse AI JSON",
+        rawText: parsed.rawText,
+      });
     }
 
-    let roadmap;
-    try {
-      roadmap = JSON.parse(text);
-    } catch (err) {
-      const match = text.match(/\{[\s\S]*\}/);
-      if (match) {
-        try {
-          roadmap = JSON.parse(match[0]);
-        } catch {
-          return res.status(200).json({
-            ok: false,
-            error: "Failed to parse AI JSON",
-            rawText: text,
-          });
-        }
-      } else {
-        return res.status(200).json({
-          ok: false,
-          error: "Invalid AI response",
-          rawText: text,
-        });
-      }
-    }
-    // ----------------------------------------
-
-    return res.status(200).json({ ok: true, roadmap });
+    return res.status(200).json({ ok: true, roadmap: parsed.value });
   } catch (err) {
-    console.error("roadmap error", err);
+    console.error("career-roadmap error", err);
     return res.status(200).json({
       ok: false,
       error: "Server error while generating roadmap",
