@@ -1,29 +1,45 @@
-// /api/career-roadmap.js
+// /pages/api/career-roadmap.js (backend repo)
 import OpenAI from "openai";
 
-// Allow both your Webflow + Vercel sites + localhost
+// ✅ Allow both your Webflow + Vercel sites + localhost
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",
   "https://hireedge-2d4baa.webflow.io",
-  "http://localhost:3000"
+  "http://localhost:3000",
 ];
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-export default async function handler(req, res) {
-  // ----- CORS -----
+// ✅ CORS helper
+function applyCors(req, res) {
   const origin = req.headers.origin;
-  const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
-    ? origin
-    : ALLOWED_ORIGINS[0];
 
-  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // Only reflect allowed origins
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
+  // Important for caches when reflecting Origin
   res.setHeader("Vary", "Origin");
 
+  // Methods + headers (✅ include Authorization)
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
+
+  // Optional but good
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+export default async function handler(req, res) {
+  // ----- CORS -----
+  applyCors(req, res);
+
+  // ✅ handle preflight
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -38,7 +54,7 @@ export default async function handler(req, res) {
       currentRole = "Not provided",
       targetRole = "Not provided",
       skills = [],
-      experienceYears = "Not provided"
+      experienceYears = "Not provided",
     } = req.body || {};
 
     const systemPrompt = `
@@ -63,21 +79,21 @@ Return JSON ONLY with this structure:
 }
 
 NO explanations. NO markdown. JSON ONLY.
-    `.trim();
+`.trim();
 
     const userPrompt = `
 Current role: ${currentRole}
 Target role: ${targetRole}
 Experience (years): ${experienceYears}
 Current skills: ${Array.isArray(skills) ? skills.join(", ") : skills}
-    `.trim();
+`.trim();
 
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ]
+        { role: "user", content: userPrompt },
+      ],
     });
 
     // -------- Parse AI output safely --------
@@ -85,7 +101,7 @@ Current skills: ${Array.isArray(skills) ? skills.join(", ") : skills}
 
     // Remove ```json fencing if present
     if (text.startsWith("```")) {
-      text = text.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
+      text = text.replace(/^```[a-zA-Z]*\n?/, "").replace(/```\s*$/, "");
     }
 
     let roadmap;
@@ -100,29 +116,25 @@ Current skills: ${Array.isArray(skills) ? skills.join(", ") : skills}
           return res.status(200).json({
             ok: false,
             error: "Failed to parse AI JSON",
-            rawText: text
+            rawText: text,
           });
         }
       } else {
         return res.status(200).json({
           ok: false,
           error: "Invalid AI response",
-          rawText: text
+          rawText: text,
         });
       }
     }
     // ----------------------------------------
 
-    return res.status(200).json({
-      ok: true,
-      roadmap
-    });
-
+    return res.status(200).json({ ok: true, roadmap });
   } catch (err) {
     console.error("roadmap error", err);
     return res.status(200).json({
       ok: false,
-      error: "Server error while generating roadmap"
+      error: "Server error while generating roadmap",
     });
   }
 }
