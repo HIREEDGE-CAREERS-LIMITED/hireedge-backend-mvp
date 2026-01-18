@@ -1,42 +1,49 @@
 // /api/linkedin-optimizer.js
 import OpenAI from "openai";
 
-const ALLOWED_ORIGINS = [
-  "https://hireedge-mvp-web.vercel.app",
-  "https://hireedge-2d4baa.webflow.io",
-  "http://localhost:3000"
-];
-
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Safe parse helper (handles code fences)
+function cleanJsonText(raw) {
+  let t = String(raw || "").trim();
+  if (t.startsWith("```")) {
+    t = t.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "").trim();
+  }
+  return t;
+}
+
 export default async function handler(req, res) {
-  // ----- CORS -----
-  const origin = req.headers.origin;
-  const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
-    ? origin
-    : ALLOWED_ORIGINS[0];
-
-  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Vary", "Origin");
-
-  if (req.method === "OPTIONS") return res.status(200).end();
-  // ----- END CORS -----
-
+  // ✅ POST only
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    res.setHeader("Allow", ["POST"]);
+    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
 
   try {
-    const { currentRole, targetRole, industry, cvText } = req.body || {};
+    const { currentRole = "", targetRole = "", industry = "", cvText = "" } = req.body || {};
 
-    if (!cvText) {
+    if (!String(cvText).trim()) {
+      return res.status(400).json({ ok: false, error: "cvText is required" });
+    }
+
+    // ✅ fallback if OpenAI key missing
+    if (!process.env.OPENAI_API_KEY) {
       return res.status(200).json({
-        ok: false,
-        error: "cvText is required for optimisation",
+        ok: true,
+        headline: `${targetRole || currentRole || "Professional"} | ${industry || "Industry"}`,
+        about:
+          "OpenAI_API_KEY missing on backend. This is a fallback output so the app never crashes.\n\n" +
+          "Add OPENAI_API_KEY in Vercel environment variables and redeploy to enable AI output.",
+        summary: "Fallback output (no AI call).",
+        strengths: ["communication", "teamwork", "problem-solving", "stakeholder management"],
+        searchKeywords: ["sales", "customer success", "account management", "business development"],
+        hashtags: ["#career", "#jobs", "#linkedin", "#sales"],
+        experienceBullets: [
+          "Delivered measurable results across targets and KPIs.",
+          "Built strong stakeholder relationships and improved outcomes.",
+        ],
       });
     }
 
@@ -63,9 +70,9 @@ Rules:
 - Strengths: 4–8 bullet points.
 - Search keywords: recruiter search terms (no #).
 - Hashtags: 5–12 best hashtags for this profile (with #).
-- Experience bullets: achievement-style bullet lines that user can paste into Experience section.
+- Experience bullets: achievement-style bullet lines.
 - Do NOT include backticks or any text outside valid JSON.
-    `.trim();
+`.trim();
 
     const userPrompt = `
 CURRENT ROLE: ${currentRole || "Not specified"}
@@ -76,7 +83,7 @@ CANDIDATE CV / BACKGROUND:
 ${cvText}
 
 Create the LinkedIn profile elements and return JSON only.
-    `.trim();
+`.trim();
 
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
@@ -86,11 +93,8 @@ Create the LinkedIn profile elements and return JSON only.
       ],
     });
 
-    let raw = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
-
-    if (raw.startsWith("```")) {
-      raw = raw.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
-    }
+    let raw = response.output?.[0]?.content?.[0]?.text ?? "";
+    raw = cleanJsonText(raw);
 
     let parsed;
     try {
@@ -104,21 +108,19 @@ Create the LinkedIn profile elements and return JSON only.
       });
     }
 
-    const result = {
+    return res.status(200).json({
       ok: true,
       headline: parsed.headline || "",
       about: parsed.about || "",
       summary: parsed.summary || "",
-      strengths: parsed.strengths || [],
-      searchKeywords: parsed.searchKeywords || [],
-      hashtags: parsed.hashtags || [],
-      experienceBullets: parsed.experienceBullets || [],
-    };
-
-    return res.status(200).json(result);
+      strengths: Array.isArray(parsed.strengths) ? parsed.strengths : [],
+      searchKeywords: Array.isArray(parsed.searchKeywords) ? parsed.searchKeywords : [],
+      hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags : [],
+      experienceBullets: Array.isArray(parsed.experienceBullets) ? parsed.experienceBullets : [],
+    });
   } catch (err) {
     console.error("linkedin-optimizer error:", err);
-    return res.status(200).json({
+    return res.status(500).json({
       ok: false,
       error: "LinkedIn optimiser failed. Please try again.",
     });
