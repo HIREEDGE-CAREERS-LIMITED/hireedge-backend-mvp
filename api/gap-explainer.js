@@ -1,4 +1,5 @@
 // /api/gap-explainer.js
+import OpenAI from "openai";
 
 const ALLOWED_ORIGINS = [
   "https://hireedge-backend-mvp.vercel.app", // self
@@ -7,21 +8,54 @@ const ALLOWED_ORIGINS = [
   "http://localhost:3000"                    // local dev
 ];
 
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// ✅ map frontend labels -> internal types
+function normalizeGapType(input) {
+  const s = String(input || "").trim().toLowerCase();
+
+  // exact/contains mapping (covers your dropdown labels)
+  if (s.includes("relocation") || s.includes("moved")) return "relocation";
+  if (s.includes("study") || s.includes("cert")) return "study";
+  if (s.includes("health") || s.includes("personal")) return "health";
+  if (s.includes("caring") || s.includes("family")) return "family";
+  if (s.includes("job search") || s.includes("redund")) return "job_search";
+  if (s.includes("travel") || s.includes("sabbat")) return "travel";
+  if (s.includes("career transition") || s.includes("career change")) return "career_change";
+
+  // if user sends your old internal codes already:
+  if (
+    ["study","relocation","family","health","job_search","career_change","travel","other"].includes(s)
+  ) return s;
+
+  return "other";
+}
+
+function safeStr(x) {
+  return typeof x === "string" ? x.trim() : "";
+}
+
+async function safeReadJsonFromModel(raw) {
+  let txt = (raw || "").trim();
+  if (txt.startsWith("```")) {
+    txt = txt.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
+  }
+  return JSON.parse(txt);
+}
+
 export default async function handler(req, res) {
   // ----- CORS -----
   const origin = req.headers.origin;
-  const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
-    ? origin
-    : ALLOWED_ORIGINS[0];
+  const allowedOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
 
   res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Vary", "Origin");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
   // ----- END CORS -----
 
   if (req.method !== "POST") {
@@ -29,117 +63,156 @@ export default async function handler(req, res) {
   }
 
   try {
-    const {
-      gapType,
-      duration = "",
-      previousRole = "",
-      targetRole = "",
-      reasonDetails = ""
-    } = req.body || {};
+    const body = req.body || {};
 
-    if (!gapType) {
+    // ✅ accept BOTH naming styles (frontend + backend)
+    const gapTypeRaw = body.gapType;
+    const duration = safeStr(body.duration);
+    const previousRole = safeStr(body.previousRole);
+    const targetRole = safeStr(body.targetRole);
+
+    // frontend sends whatDidYouDo — backend used reasonDetails earlier
+    const reasonDetails = safeStr(body.reasonDetails || body.whatDidYouDo);
+
+    const gapType = normalizeGapType(gapTypeRaw);
+
+    if (!gapTypeRaw) {
+      return res.status(200).json({ ok: false, error: "gapType is required" });
+    }
+    if (!reasonDetails) {
+      return res.status(200).json({ ok: false, error: "Please describe what you did during the gap." });
+    }
+
+    // ✅ fast fallback templates (in case OpenAI key missing)
+    const fromRole = previousRole || "my previous role";
+    const toRole = targetRole || "this role";
+    const dur = duration ? ` (${duration})` : "";
+
+    const fallback = {
+      cvLine: `Planned career break${dur} to focus on ${reasonDetails}, now returning to full-time work aligned with ${toRole}.`,
+      interviewAnswer:
+        `I took a planned break${dur} to focus on ${reasonDetails}. I stayed structured, kept learning, and I’m now ready to bring that focus back into a full-time role aligned with ${toRole}.`,
+      recruiterEmail:
+        `You may notice a short gap${dur}. During this time, I focused on ${reasonDetails}. I’m now fully available and actively seeking a long-term opportunity aligned with ${toRole}.`,
+      guidanceNote:
+        "Keep it honest, positive, and future-focused. Avoid over-explaining; emphasise what you learned and why you’re ready now.",
+    };
+
+    // ✅ If OpenAI key not configured, return fallback + extra fields
+    if (!process.env.OPENAI_API_KEY) {
       return res.status(200).json({
-        ok: false,
-        error: "gapType is required"
+        ok: true,
+        gapType,
+        duration,
+        ...fallback,
+
+        // keep compatibility with your older key names too
+        emailParagraph: fallback.recruiterEmail,
+        note: fallback.guidanceNote,
       });
     }
 
-    const fromRole = previousRole || "my previous role";
-    const toRole   = targetRole || "this role";
+    // ---------- AI PROMPTS (premium output) ----------
+    const systemPrompt = `
+You are "HireEdge Career Gap Coach".
 
-    let cvLine = "";
-    let interviewAnswer = "";
-    let emailParagraph = "";
+Generate premium, recruiter-ready gap explanations.
+Tone: confident, honest, positive, concise (UK job market).
+Never mention "I was unemployed". Use "career break" / "planned break" / "transition period".
+Avoid medical detail. Avoid personal oversharing.
 
-    const extra =
-      reasonDetails && reasonDetails.trim().length > 0
-        ? ` I used this time for ${reasonDetails.trim()}.`
-        : "";
+Return ONLY JSON in this schema:
 
-    switch (gapType) {
-      case "study":
-        cvLine = `Took a planned break from ${fromRole} to focus on full-time study and skill development${extra}.`;
-        interviewAnswer =
-          `I took a planned break from work to focus on my studies and building stronger skills for ${toRole}.` +
-          extra +
-          " I kept a routine, stayed close to industry news, and now I’m ready to apply what I’ve learned in a stable, long-term role.";
-        emailParagraph =
-          `During this period I stepped away from full-time work to focus on further study and development relevant to ${toRole}.` +
-          extra +
-          " I am now ready to return to full-time employment and bring that learning into your team.";
-        break;
+{
+  "cvLine": string,
+  "cvLineOptions": string[],
+  "interviewAnswer": string,
+  "interviewAnswerOptions": string[],
+  "recruiterEmail": string,
+  "coverLetterLine": string,
+  "linkedinLine": string,
+  "keyStrengthsToHighlight": string[],
+  "doDont": { "do": string[], "dont": string[] },
+  "tailoringTips": string[]
+}
 
-      case "relocation":
-        cvLine = `Career break due to relocation and settling into a new country, while preparing to re-enter work in ${toRole}.`;
-        interviewAnswer =
-          "I relocated, which meant I had to focus on settling, understanding the local job market and arranging the right documents. " +
-          "I used the time to understand expectations in the UK market, update my CV and improve my skills. Now I am settled and ready to commit fully to a long-term role.";
-        emailParagraph =
-          "There is a gap on my CV due to relocating and settling in a new country. During this time I focused on understanding the local job market and preparing to return to work. I am now fully settled and available for full-time employment.";
-        break;
+Rules:
+- cvLine <= 180 chars, ATS-friendly.
+- interview answers 120–180 words.
+- recruiterEmail is a short paragraph (3–5 lines).
+- Make it specific to the target role and what they did.
+- No markdown, no backticks, JSON only.
+`.trim();
 
-      case "family":
-        cvLine = "Temporary break from work for family responsibilities, now fully available to return to full-time work.";
-        interviewAnswer =
-          "I took a temporary break from work to manage important family responsibilities. " +
-          "It was a planned decision, and once the situation was stable I started preparing to return – updating my skills, reviewing the market and planning my next steps. Now I’m in a position to focus fully on my career again.";
-        emailParagraph =
-          "The gap on my CV is due to a planned period where I had to focus on family responsibilities. That situation is now stable, and I am fully committed to returning to full-time work.";
-        break;
+    const userPrompt = `
+GAP TYPE: ${gapType}
+DURATION: ${duration || "Not specified"}
+PREVIOUS ROLE: ${previousRole || "Not specified"}
+TARGET ROLE: ${targetRole || "Not specified"}
 
-      case "health":
-        cvLine = "Short break from work for health reasons (now resolved) and cleared to return to full-time employment.";
-        interviewAnswer =
-          "I had a health issue which required me to step back from work for a period. It has been treated and I have medical clearance to work full-time again. " +
-          "I’m happy to focus the rest of the conversation on how I can perform in this role now.";
-        emailParagraph =
-          "There is a short gap on my CV due to a health matter which has since been resolved. I am fully fit to work and ready to focus on adding value in a long-term role.";
-        break;
+WHAT I DID DURING THE GAP:
+${reasonDetails}
 
-      case "job_search":
-        cvLine = `Focused period on targeted job search and upskilling towards roles in ${toRole}.`;
-        interviewAnswer =
-          "After my last role I made a deliberate decision to look for a position that was the right long-term fit. " +
-          "During this time I treated job search like a project – improving my CV, learning about the market, and building skills that match roles like this one.";
-        emailParagraph =
-          "The recent gap reflects a deliberate job search period where I focused on finding a role aligned with my long-term direction and improving my skills to match positions like this.";
-        break;
+Generate premium outputs for CV + interview + recruiter email + LinkedIn.
+`.trim();
 
-      case "career_change":
-        cvLine = `Transition period to move from ${fromRole} into ${toRole}, including self-study and practical projects.`;
-        interviewAnswer =
-          `I chose to transition from ${fromRole} into ${toRole}. I used this time to study, complete small projects and understand how my existing skills transfer.` +
-          " Now I’m ready to bring both my past experience and new skills into this role.";
-        emailParagraph =
-          `The gap is linked to my transition from ${fromRole} into ${toRole}, where I invested time into learning, building projects and aligning my profile with this direction.`;
-        break;
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
 
-      default:
-        cvLine = `Short break from formal employment, now returning to full-time work focused on ${toRole}.`;
-        interviewAnswer =
-          "There is a short gap on my CV where I was not in formal employment. I used the time to reflect, learn and plan my next step, and now I’m focused on a long-term role like this.";
-        emailParagraph =
-          "You may notice a short gap on my CV. This was a period between roles which I used to prepare for my next long-term opportunity. I am now fully available and motivated to return to full-time work.";
+    const raw = response.output?.[0]?.content?.[0]?.text ?? "";
+    let parsed;
+    try {
+      parsed = await safeReadJsonFromModel(raw);
+    } catch (e) {
+      console.error("gap-explainer parse error:", raw);
+      // fallback if model returns bad JSON
+      return res.status(200).json({
+        ok: true,
+        gapType,
+        duration,
+        ...fallback,
+        emailParagraph: fallback.recruiterEmail,
+        note: fallback.guidanceNote,
+      });
     }
 
-    const durationText = duration ? `Approximate duration: ${duration}.` : "";
-
-    return res.status(200).json({
+    const result = {
       ok: true,
       gapType,
       duration,
-      cvLine,
-      interviewAnswer,
-      emailParagraph,
-      note:
-        "These are templates for explaining your gap in a clear, honest and professional way. Adjust wording to match your personal situation.",
-      durationText
-    });
+
+      // ✅ keys your frontend currently renders
+      cvLine: safeStr(parsed.cvLine) || fallback.cvLine,
+      interviewAnswer: safeStr(parsed.interviewAnswer) || fallback.interviewAnswer,
+      recruiterEmail: safeStr(parsed.recruiterEmail) || fallback.recruiterEmail,
+      guidanceNote: fallback.guidanceNote,
+
+      // ✅ premium extras (later you can show these in UI)
+      cvLineOptions: Array.isArray(parsed.cvLineOptions) ? parsed.cvLineOptions.filter(Boolean) : [],
+      interviewAnswerOptions: Array.isArray(parsed.interviewAnswerOptions) ? parsed.interviewAnswerOptions.filter(Boolean) : [],
+      coverLetterLine: safeStr(parsed.coverLetterLine),
+      linkedinLine: safeStr(parsed.linkedinLine),
+      keyStrengthsToHighlight: Array.isArray(parsed.keyStrengthsToHighlight) ? parsed.keyStrengthsToHighlight.filter(Boolean) : [],
+      doDont: parsed.doDont && typeof parsed.doDont === "object" ? parsed.doDont : { do: [], dont: [] },
+      tailoringTips: Array.isArray(parsed.tailoringTips) ? parsed.tailoringTips.filter(Boolean) : [],
+
+      // ✅ backward compatible old keys (if any other page uses them)
+      emailParagraph: safeStr(parsed.recruiterEmail) || fallback.recruiterEmail,
+      note: fallback.guidanceNote,
+      durationText: duration ? `Approximate duration: ${duration}.` : "",
+    };
+
+    return res.status(200).json(result);
   } catch (err) {
     console.error("gap-explainer error", err);
     return res.status(200).json({
       ok: false,
-      error: "Server error while generating gap explanation"
+      error: "Server error while generating gap explanation",
     });
   }
 }
