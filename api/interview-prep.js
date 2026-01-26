@@ -1,4 +1,4 @@
-// /api/interview-prep.js
+// pages/api/interview-prep.js
 import OpenAI from "openai";
 
 const ALLOWED_ORIGINS = [
@@ -10,6 +10,24 @@ const ALLOWED_ORIGINS = [
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+// ✅ small helper (safer than crashing on non-JSON)
+function safeJsonParse(raw) {
+  if (!raw) return { ok: false, error: "Empty AI response" };
+
+  let text = String(raw).trim();
+
+  // strip ```json fences if model adds them
+  if (text.startsWith("```")) {
+    text = text.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "").trim();
+  }
+
+  try {
+    return { ok: true, data: JSON.parse(text) };
+  } catch {
+    return { ok: false, error: "JSON parse failed", rawText: text };
+  }
+}
 
 export default async function handler(req, res) {
   // ---------- CORS ----------
@@ -66,9 +84,17 @@ ALWAYS respond with ONLY this JSON shape:
 
 Rules:
 - Behavioural answers should follow STAR style where relevant.
-- Role-specific questions must be tailored to the job.
 - Keep answers concise but practical.
 - Do NOT include backticks or any text outside JSON.
+
+Output constraints (IMPORTANT):
+- Return EXACTLY 4 behaviouralQuestions (each with question + answer).
+- Return EXACTLY 6 roleSpecificQuestions (each with question + answer).
+- Return EXACTLY 4 strengthQuestions (each with question + answer).
+- Return EXACTLY 6 closingQuestions (strings).
+- Return EXACTLY 8 tips (strings).
+- Make roleSpecificQuestions tightly aligned to the provided jobDescription/targetRole.
+- Make strengthQuestions reflect the candidate CV where provided.
 `.trim();
 
     const userPrompt = `
@@ -92,24 +118,23 @@ Create targeted interview prep and return JSON only.
       ],
     });
 
-    let raw = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
+    // robust extraction
+    const raw =
+      (typeof response.output_text === "string" && response.output_text.trim()) ||
+      response.output?.[0]?.content?.[0]?.text?.trim() ||
+      "";
 
-    // strip ```json fences if model adds them
-    if (raw.startsWith("```")) {
-      raw = raw.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
-    }
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      console.error("❌ interview-prep JSON parse error:", raw);
+    const parsedRes = safeJsonParse(raw);
+    if (!parsedRes.ok) {
+      console.error("❌ interview-prep JSON parse error:", parsedRes.rawText || raw);
       return res.status(200).json({
         ok: false,
         error: "Failed to parse AI response",
-        rawText: raw,
+        rawText: parsedRes.rawText || raw,
       });
     }
+
+    const parsed = parsedRes.data || {};
 
     // ---------- NORMALISE TO FRONTEND SCHEMA ----------
 
@@ -117,8 +142,13 @@ Create targeted interview prep and return JSON only.
     const openingPitch = String(parsed.roleSummary || "").trim();
 
     // Core Interview Questions (role + strengths combined)
-    const coreQuestions = []
-      .concat(Array.isArray(parsed.roleSpecificQuestions) ? parsed.roleSpecificQuestions : [])
+    const MIN_CORE = 7;
+    const MAX_CORE = 10;
+
+    let coreQuestions = []
+      .concat(
+        Array.isArray(parsed.roleSpecificQuestions) ? parsed.roleSpecificQuestions : []
+      )
       .concat(Array.isArray(parsed.strengthQuestions) ? parsed.strengthQuestions : [])
       .map((x) => {
         if (typeof x === "string") return x.trim();
@@ -126,6 +156,33 @@ Create targeted interview prep and return JSON only.
         return "";
       })
       .filter(Boolean);
+
+    // cap to max
+    coreQuestions = coreQuestions.slice(0, MAX_CORE);
+
+    // pad to min (rare, but keeps UI consistent)
+    if (coreQuestions.length < MIN_CORE) {
+      const role = targetRole || "this role";
+      const fallback = [
+        `Walk me through your experience relevant to ${role}.`,
+        `Why do you want ${role} and why now?`,
+        `What are your top strengths for ${role}?`,
+        `What’s one development area you’re actively improving?`,
+        `Tell me about a time you handled a challenging situation at work.`,
+        `How do you prioritise when everything is urgent?`,
+        `What would you do in your first 30/60/90 days in ${role}?`,
+        `How do you handle feedback or disagreement with a stakeholder?`,
+        `What metrics do you use to measure success in your work?`,
+        `Describe a time you improved a process or delivered measurable results.`,
+      ];
+
+      for (const q of fallback) {
+        if (coreQuestions.length >= MIN_CORE) break;
+        if (!coreQuestions.includes(q)) coreQuestions.push(q);
+      }
+
+      coreQuestions = coreQuestions.slice(0, MAX_CORE);
+    }
 
     // Behavioural STAR Q&A
     const behaviouralQuestions = (Array.isArray(parsed.behaviouralQuestions)
@@ -164,11 +221,15 @@ Create targeted interview prep and return JSON only.
 
       // 🔁 keep originals (safe for future)
       roleSummary: parsed.roleSummary || "",
-      focusAreas: parsed.focusAreas || [],
-      roleSpecificQuestions: parsed.roleSpecificQuestions || [],
-      strengthQuestions: parsed.strengthQuestions || [],
-      closingQuestions: parsed.closingQuestions || [],
-      tips: parsed.tips || [],
+      focusAreas: Array.isArray(parsed.focusAreas) ? parsed.focusAreas : [],
+      roleSpecificQuestions: Array.isArray(parsed.roleSpecificQuestions)
+        ? parsed.roleSpecificQuestions
+        : [],
+      strengthQuestions: Array.isArray(parsed.strengthQuestions)
+        ? parsed.strengthQuestions
+        : [],
+      closingQuestions: Array.isArray(parsed.closingQuestions) ? parsed.closingQuestions : [],
+      tips: Array.isArray(parsed.tips) ? parsed.tips : [],
     });
   } catch (err) {
     console.error("❌ interview-prep error:", err);
