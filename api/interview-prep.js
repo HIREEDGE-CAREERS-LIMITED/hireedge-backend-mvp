@@ -29,6 +29,90 @@ function safeJsonParse(raw) {
   }
 }
 
+// ✅ ensure behavioural is always exactly N items (pad/trim)
+function ensureBehaviouralCount(list, targetRole, n = 10) {
+  const role = targetRole || "this role";
+
+  const cleaned = (Array.isArray(list) ? list : [])
+    .map((x) => ({
+      question: typeof x?.question === "string" ? x.question.trim() : "",
+      answer: typeof x?.answer === "string" ? x.answer.trim() : "",
+    }))
+    .filter((x) => x.question);
+
+  const fallback = [
+    {
+      question: `Tell me about a time you handled a difficult stakeholder in ${role}.`,
+      answer:
+        "STAR: Situation + Task + Action (how you communicated and aligned expectations) + Result (measurable impact).",
+    },
+    {
+      question: `Describe a time you led a team through pressure or tight deadlines in ${role}.`,
+      answer:
+        "STAR: Set priorities, delegated, tracked progress, removed blockers, and delivered outcome with metrics.",
+    },
+    {
+      question: "Tell me about a time you made a mistake. What did you do?",
+      answer:
+        "STAR: Own it early, communicate, fix fast, prevent recurrence (process change), share learning.",
+    },
+    {
+      question: "Describe a time you had conflict with a colleague and how you resolved it.",
+      answer:
+        "STAR: Focus on facts, listen, find common goal, agree actions, confirm outcome and relationship improved.",
+    },
+    {
+      question: "Give an example of when you improved a process.",
+      answer:
+        "STAR: Identify bottleneck, propose change, implement, measure before/after, sustain with documentation.",
+    },
+    {
+      question: "Tell me about a time you influenced someone without authority.",
+      answer:
+        "STAR: Build rapport, use data, align incentives, propose small pilot, gain buy-in, deliver result.",
+    },
+    {
+      question: "Describe a time you dealt with an unhappy customer/client.",
+      answer:
+        "STAR: Empathise, clarify issue, propose options, take ownership, follow up, restore trust with result.",
+    },
+    {
+      question: "Tell me about a time you handled multiple priorities at once.",
+      answer:
+        "STAR: Triage, define urgency/impact, communicate timelines, execute, review and adjust as needed.",
+    },
+    {
+      question: "Describe a time you received critical feedback.",
+      answer:
+        "STAR: Listen, clarify, agree improvement plan, apply change, show improved outcome later.",
+    },
+    {
+      question: "Tell me about a time you used data to make a decision.",
+      answer:
+        "STAR: Define metric, collect/compare, choose approach, implement, track impact, share insight.",
+    },
+  ];
+
+  // Pad if needed
+  let out = cleaned.slice(0, n);
+  let i = 0;
+  while (out.length < n && i < fallback.length) {
+    const item = fallback[i++];
+    if (!out.some((x) => x.question === item.question)) out.push(item);
+  }
+
+  // If still short (very unlikely), keep adding generic variations
+  while (out.length < n) {
+    out.push({
+      question: `Tell me about a time you demonstrated leadership relevant to ${role}.`,
+      answer:
+        "STAR: Context + your responsibility + what you did + measurable result + what you learned.",
+    });
+  }
+
+  return out.slice(0, n);
+}
+
 export default async function handler(req, res) {
   // ---------- CORS ----------
   const origin = req.headers.origin;
@@ -89,6 +173,10 @@ Rules:
 
 Output constraints (IMPORTANT):
 - Return EXACTLY 10 behaviouralQuestions (each with question + answer).
+  • 4 leadership/decision-making
+  • 3 teamwork/collaboration
+  • 2 conflict/failure handling
+  • 1 pressure/time-management
 - Return EXACTLY 6 roleSpecificQuestions (each with question + answer).
 - Return EXACTLY 4 strengthQuestions (each with question + answer).
 - Return EXACTLY 6 closingQuestions (strings).
@@ -184,16 +272,12 @@ Create targeted interview prep and return JSON only.
       coreQuestions = coreQuestions.slice(0, MAX_CORE);
     }
 
-    // Behavioural STAR Q&A
-    const behaviouralQuestions = (Array.isArray(parsed.behaviouralQuestions)
-      ? parsed.behaviouralQuestions
-      : []
-    )
-      .map((x) => ({
-        question: typeof x?.question === "string" ? x.question.trim() : "",
-        answer: typeof x?.answer === "string" ? x.answer.trim() : "",
-      }))
-      .filter((x) => x.question);
+    // Behavioural STAR Q&A (force exactly 10 for UI)
+    const behaviouralQuestions = ensureBehaviouralCount(
+      parsed.behaviouralQuestions,
+      targetRole,
+      10
+    );
 
     // Questions to Ask Interviewer
     const questionsForInterviewer = (Array.isArray(parsed.closingQuestions)
@@ -215,7 +299,7 @@ Create targeted interview prep and return JSON only.
       // ✅ frontend-standard keys (USED BY UI)
       openingPitch,
       coreQuestions,
-      behaviouralQuestions,
+      behaviouralQuestions, // ✅ now guaranteed 10
       questionsForInterviewer,
       finalTips,
 
@@ -228,7 +312,9 @@ Create targeted interview prep and return JSON only.
       strengthQuestions: Array.isArray(parsed.strengthQuestions)
         ? parsed.strengthQuestions
         : [],
-      closingQuestions: Array.isArray(parsed.closingQuestions) ? parsed.closingQuestions : [],
+      closingQuestions: Array.isArray(parsed.closingQuestions)
+        ? parsed.closingQuestions
+        : [],
       tips: Array.isArray(parsed.tips) ? parsed.tips : [],
     });
   } catch (err) {
