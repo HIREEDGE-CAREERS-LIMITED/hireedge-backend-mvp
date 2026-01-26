@@ -88,7 +88,7 @@ Rules:
 - Do NOT include backticks or any text outside JSON.
 
 Output constraints (IMPORTANT):
-- Return EXACTLY 4 behaviouralQuestions (each with question + answer).
+- Return EXACTLY 10 behaviouralQuestions (each with question + answer).
 - Return EXACTLY 6 roleSpecificQuestions (each with question + answer).
 - Return EXACTLY 4 strengthQuestions (each with question + answer).
 - Return EXACTLY 6 closingQuestions (strings).
