@@ -57,7 +57,6 @@ function normalizeSkills(skills) {
 function stripCodeFences(s) {
   if (!s) return "";
   let text = String(s).trim();
-  // remove ```json ... ``` or ``` ... ```
   text = text.replace(/^```[a-zA-Z]*\s*/g, "");
   text = text.replace(/```$/g, "");
   return text.trim();
@@ -147,21 +146,21 @@ Experience (years): ${exp}
 Current skills: ${skills.join(", ")}
 `.trim();
 
-    // ✅ OpenAI call (most reliable JSON enforcement)
+    // ✅ OpenAI call (NO response_format to avoid sudden model/tool incompatibility)
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      response_format: { type: "json_object" },
       max_output_tokens: 1800,
     });
 
+    // ✅ Responses API safest text extraction
     const text = (response.output_text || "").trim();
 
-    // If model returned empty text for any reason
     if (!text) {
+      console.error("career-roadmap: Empty output_text", response);
       return res.status(500).json({
         ok: false,
         error: "Empty response from AI",
@@ -179,23 +178,21 @@ Current skills: ${skills.join(", ")}
 
     return res.status(200).json({ ok: true, roadmap: parsed.json });
   } catch (err) {
-    // ✅ Better error logging (helps in Vercel logs)
+    // ✅ Log useful OpenAI error details (shows in Vercel logs)
     const status = err?.status || err?.response?.status;
     const message = err?.message || "Unknown error";
 
     console.error("career-roadmap OpenAI error:", {
       status,
       message,
-      err,
+      // Sometimes OpenAI error body is here:
+      data: err?.response?.data,
     });
-
-    // Show more details only in development (optional)
-    const isDev = process.env.NODE_ENV !== "production";
 
     return res.status(500).json({
       ok: false,
       error: "Server error while generating roadmap",
-      ...(isDev ? { debug: { status, message } } : {}),
+      debug: { status, message },
     });
   }
 }
