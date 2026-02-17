@@ -1,13 +1,16 @@
 // /pages/api/career-roadmap.js
 import OpenAI from "openai";
 
+// ✅ Allow both your Webflow + Vercel sites + localhost
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",
   "https://hireedge-2d4baa.webflow.io",
   "http://localhost:3000",
 ];
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // ✅ CORS helper
 function applyCors(req, res) {
@@ -23,7 +26,7 @@ function applyCors(req, res) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// ✅ Robust body parsing (sometimes Next gives req.body as string)
+// ✅ Robust body parsing (Next sometimes gives req.body as string)
 function getBody(req) {
   if (!req.body) return {};
   if (typeof req.body === "string") {
@@ -36,16 +39,19 @@ function getBody(req) {
   return req.body;
 }
 
-// ✅ Normalize skills (your UI might send string or array)
+// ✅ Normalize skills (UI can send string or array)
 function normalizeSkills(skills) {
   if (!skills) return [];
-  if (Array.isArray(skills)) return skills.map(s => String(s).trim()).filter(Boolean);
+  if (Array.isArray(skills))
+    return skills.map((s) => String(s).trim()).filter(Boolean);
+
   if (typeof skills === "string") {
     return skills
-      .split(/[\n,]+/g)
-      .map(s => s.trim())
+      .split(/[\n,]+/g) // split by new lines OR commas
+      .map((s) => s.trim())
       .filter(Boolean);
   }
+
   return [];
 }
 
@@ -109,29 +115,39 @@ Current skills: ${skills.join(", ")}
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
+        {
+          role: "system",
+          content: [{ type: "text", text: systemPrompt }],
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: userPrompt }],
+        },
       ],
 
-      // ✅ HARD ENFORCEMENT: makes the model return valid JSON object
-      response_format: { type: "json_object" },
+      // ✅ BEST: structured output that returns parsed JSON directly
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "career_roadmap",
+          schema: {
+            type: "object",
+            additionalProperties: true,
+          },
+        },
+      },
 
       max_output_tokens: 1800,
     });
 
-    // ✅ Most reliable way to get text from Responses API
-    const raw = (response.output_text || "").trim();
+    // ✅ parsed output directly (no JSON.parse needed)
+    const roadmap = response.output_parsed;
 
-    // Since response_format json_object is used, raw should be JSON already
-    let roadmap;
-    try {
-      roadmap = JSON.parse(raw);
-    } catch (e) {
-      console.error("JSON parse failed. RAW OUTPUT:", raw);
+    if (!roadmap) {
+      console.error("No parsed output returned:", response);
       return res.status(500).json({
         ok: false,
-        error: "AI returned invalid JSON unexpectedly",
-        rawText: raw,
+        error: "AI returned empty structured output",
       });
     }
 
