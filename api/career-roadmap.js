@@ -1,16 +1,13 @@
-// /pages/api/career-roadmap.js  (BACKEND repo)
+// /pages/api/career-roadmap.js
 import OpenAI from "openai";
 
-// ✅ Allow both your Webflow + Vercel sites + localhost
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",
   "https://hireedge-2d4baa.webflow.io",
   "http://localhost:3000",
 ];
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ✅ CORS helper
 function applyCors(req, res) {
@@ -26,28 +23,30 @@ function applyCors(req, res) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-function stripCodeFences(s) {
-  if (!s) return "";
-  let text = String(s).trim();
-  if (text.startsWith("```")) {
-    text = text.replace(/^```[a-zA-Z]*\n?/, "").replace(/```\s*$/, "");
-  }
-  return text.trim();
-}
-
-function tryParseJson(text) {
-  const cleaned = stripCodeFences(text);
-  try {
-    return { ok: true, json: JSON.parse(cleaned) };
-  } catch {
-    const match = cleaned.match(/\{[\s\S]*\}/);
-    if (!match) return { ok: false, error: "No JSON object found", raw: cleaned };
+// ✅ Robust body parsing (sometimes Next gives req.body as string)
+function getBody(req) {
+  if (!req.body) return {};
+  if (typeof req.body === "string") {
     try {
-      return { ok: true, json: JSON.parse(match[0]) };
+      return JSON.parse(req.body);
     } catch {
-      return { ok: false, error: "Failed to parse JSON", raw: cleaned };
+      return {};
     }
   }
+  return req.body;
+}
+
+// ✅ Normalize skills (your UI might send string or array)
+function normalizeSkills(skills) {
+  if (!skills) return [];
+  if (Array.isArray(skills)) return skills.map(s => String(s).trim()).filter(Boolean);
+  if (typeof skills === "string") {
+    return skills
+      .split(/[\n,]+/g)
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+  return [];
 }
 
 export default async function handler(req, res) {
@@ -59,17 +58,18 @@ export default async function handler(req, res) {
   }
 
   try {
-    const body = req.body || {};
+    const body = getBody(req);
 
     const currentRole = body.currentRole || "Not provided";
     const targetRole = body.targetRole || "Not provided";
-    const skills = Array.isArray(body.skills) ? body.skills : [];
     const exp = body.yearsExperience ?? body.experienceYears ?? "Not provided";
+    const skills = normalizeSkills(body.skills);
 
     const systemPrompt = `
 You are the "HireEdge Career Roadmap Engine".
 
-Return JSON ONLY (no markdown, no commentary) in EXACT structure:
+Return a SINGLE valid JSON object ONLY (no markdown, no backticks, no commentary)
+in EXACT structure:
 
 {
   "summary": string,
@@ -97,8 +97,6 @@ Rules:
 - skills_in_order MUST be at least 10 items and ordered from foundational to advanced.
 - projects_to_prove_capability MUST be at least 6 items.
 - milestones_to_stay_on_track MUST be at least 10 items.
-
-JSON ONLY.
 `.trim();
 
     const userPrompt = `
@@ -114,24 +112,35 @@ Current skills: ${skills.join(", ")}
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      // Helps reduce short answers
+
+      // ✅ HARD ENFORCEMENT: makes the model return valid JSON object
+      response_format: { type: "json_object" },
+
       max_output_tokens: 1800,
     });
 
-    const text = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
+    // ✅ Most reliable way to get text from Responses API
+    const raw = (response.output_text || "").trim();
 
-    const parsed = tryParseJson(text);
-    if (!parsed.ok) {
-      return res.status(200).json({
+    // Since response_format json_object is used, raw should be JSON already
+    let roadmap;
+    try {
+      roadmap = JSON.parse(raw);
+    } catch (e) {
+      console.error("JSON parse failed. RAW OUTPUT:", raw);
+      return res.status(500).json({
         ok: false,
-        error: parsed.error || "Invalid AI response",
-        rawText: parsed.raw || text,
+        error: "AI returned invalid JSON unexpectedly",
+        rawText: raw,
       });
     }
 
-    return res.status(200).json({ ok: true, roadmap: parsed.json });
+    return res.status(200).json({ ok: true, roadmap });
   } catch (err) {
     console.error("career-roadmap error:", err);
-    return res.status(200).json({ ok: false, error: "Server error while generating roadmap" });
+    return res.status(500).json({
+      ok: false,
+      error: "Server error while generating roadmap",
+    });
   }
 }
