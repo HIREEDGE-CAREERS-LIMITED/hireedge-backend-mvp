@@ -3,19 +3,27 @@ import path from "path";
 
 let cached = null;
 
-const META = {
-  version: "1.0.0",
-  source: "HireEdge Role Intelligence Dataset (internal)",
-};
-
-// Read once and cache in memory
+/**
+ * Loads roles data safely from JSON file.
+ * Supports:
+ *  - Array: [ {...}, {...} ]
+ *  - Object wrappers: { roles: [...] } or { results: [...] } or { data: [...] }
+ */
 function loadEnrichedRoles() {
   if (cached) return cached;
 
+  // ✅ IMPORTANT: Your file name is roles-enriched.json (as per your data folder)
   const filePath = path.join(process.cwd(), "data", "roles-enriched.json");
-  const raw = fs.readFileSync(filePath, "utf8");
-  cached = JSON.parse(raw);
 
+  const raw = fs.readFileSync(filePath, "utf8");
+  const parsed = JSON.parse(raw);
+
+  // ✅ Ensure we always return an ARRAY
+  const rolesArr = Array.isArray(parsed)
+    ? parsed
+    : parsed.roles || parsed.results || parsed.data || [];
+
+  cached = rolesArr;
   return cached;
 }
 
@@ -32,33 +40,27 @@ export default function handler(req, res) {
       offset = "0",
     } = req.query;
 
-    const runtimeMeta = {
-      ...META,
+    // ✅ Meta info (useful for frontend)
+    const META = {
+      version: "1.0.0",
       last_updated: new Date().toISOString(),
+      source: "HireEdge Role Intelligence Dataset (internal)",
     };
 
-    // ---------- 1) Exact lookup by slug ----------
+    // 1) Exact lookup by slug
     if (slug) {
-      const cleanSlug = String(slug).trim().toLowerCase();
-
       const found = roles.find(
-        (r) => String(r.slug).trim().toLowerCase() === cleanSlug
+        (r) => String(r.slug || "").trim().toLowerCase() === String(slug).trim().toLowerCase()
       );
 
-      if (!found) {
-        return res.status(404).json({
-          ...runtimeMeta,
-          error: "Role not found",
-          slug: cleanSlug,
-        });
-      }
+      if (!found) return res.status(404).json({ error: "Role not found" });
 
-      // Related roles: same category, excluding itself
+      // ✅ Related roles (same category)
       const related = roles
         .filter(
           (r) =>
             r.category === found.category &&
-            String(r.slug).trim().toLowerCase() !== cleanSlug
+            String(r.slug || "") !== String(found.slug || "")
         )
         .slice(0, 8)
         .map((r) => ({
@@ -68,13 +70,13 @@ export default function handler(req, res) {
         }));
 
       return res.status(200).json({
-        ...runtimeMeta,
+        ...META,
         ...found,
         related_roles: related,
       });
     }
 
-    // ---------- 2) Filters + search ----------
+    // 2) Filters + search
     let results = roles;
 
     if (category) {
@@ -87,21 +89,16 @@ export default function handler(req, res) {
 
     if (q) {
       const qq = String(q).trim().toLowerCase();
-
-      results = results.filter((r) => {
-        const title = String(r.title || "").toLowerCase();
-        const rslug = String(r.slug || "").toLowerCase();
-        const skills = Array.isArray(r.skills) ? r.skills : [];
-
-        return (
-          title.includes(qq) ||
-          rslug.includes(qq) ||
-          skills.some((s) => String(s).toLowerCase().includes(qq))
-        );
-      });
+      results = results.filter(
+        (r) =>
+          String(r.title || "").toLowerCase().includes(qq) ||
+          String(r.slug || "").toLowerCase().includes(qq) ||
+          (Array.isArray(r.skills) &&
+            r.skills.some((s) => String(s).toLowerCase().includes(qq)))
+      );
     }
 
-    // suggestions = top 8 (after filters/search)
+    // ✅ Suggestions for autocomplete
     const suggestions = q
       ? results.slice(0, 8).map((r) => ({ slug: r.slug, title: r.title }))
       : [];
@@ -110,7 +107,7 @@ export default function handler(req, res) {
     const off = Math.max(parseInt(offset, 10) || 0, 0);
 
     return res.status(200).json({
-      ...runtimeMeta,
+      ...META,
       total: results.length,
       limit: lim,
       offset: off,
@@ -119,9 +116,7 @@ export default function handler(req, res) {
     });
   } catch (e) {
     return res.status(500).json({
-      ...META,
-      last_updated: new Date().toISOString(),
-      error: "Failed to load role intelligence data",
+      error: "Failed to load role dataset",
       details: e?.message || String(e),
     });
   }
