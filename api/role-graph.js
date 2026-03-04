@@ -1,109 +1,111 @@
+// api/role-graph.js
 import fs from "fs";
 import path from "path";
 
-let cached = null;
-
-function loadRoles() {
-  if (cached) return cached;
+function loadRolesEnriched() {
+  // Your repo structure shows: /data/roles-enriched.json exists
   const filePath = path.join(process.cwd(), "data", "roles-enriched.json");
-  const raw = fs.readFileSync(filePath, "utf8");
+  const raw = fs.readFileSync(filePath, "utf-8");
   const json = JSON.parse(raw);
 
-  // ✅ Ensure we always work with an ARRAY
-  // Some builds accidentally wrap roles inside { results: [...] }
-  cached = Array.isArray(json) ? json : Array.isArray(json?.results) ? json.results : [];
-  return cached;
+  // Support both shapes:
+  // 1) { roles: [...] }
+  // 2) [ ... ]
+  const roles = Array.isArray(json) ? json : json.roles;
+
+  if (!Array.isArray(roles)) {
+    throw new Error("roles-enriched.json format invalid (expected array or {roles:[]})");
+  }
+  return roles;
 }
 
-function bySlug(roles, slug) {
-  const s = String(slug || "").trim().toLowerCase();
-  return roles.find((r) => String(r.slug).toLowerCase() === s);
+function pickRoleFields(r) {
+  return {
+    slug: r.slug,
+    title: r.title,
+    category: r.category,
+    seniority: r.seniority,
+  };
 }
 
 export default function handler(req, res) {
   try {
-    const roles = loadRoles();
-    const { slug, depth = "2" } = req.query;
+    const { slug, depth } = req.query;
 
     if (!slug) {
-      return res.status(400).json({ error: "Missing slug. Use ?slug=data-analyst" });
+      return res.status(400).json({ error: "Missing required query param: slug" });
     }
 
-    const root = bySlug(roles, slug);
-    if (!root) return res.status(404).json({ error: "Role not found" });
+    const maxDepth = Math.min(parseInt(depth || "2", 10) || 2, 5);
 
-    const maxDepth = Math.min(Math.max(parseInt(depth, 10) || 2, 1), 5);
+    const roles = loadRolesEnriched();
+    const bySlug = new Map(roles.map((r) => [r.slug, r]));
 
-    // Build adjacency list from career_paths.next_roles
-    const adj = new Map(); // slug -> [nextSlugs]
-    for (const r of roles) {
-      const key = String(r.slug || "").toLowerCase();
-      const next = r?.career_paths?.next_roles || [];
-      const nextArr = Array.isArray(next) ? next.map((x) => String(x).toLowerCase()) : [];
-      adj.set(key, nextArr);
+    const root = bySlug.get(slug);
+    if (!root) {
+      return res.status(404).json({
+        error: "Role not found",
+        hint: "Check slug exists in data/roles-enriched.json",
+        slug,
+      });
     }
 
-    // BFS to collect nodes + edges up to depth
-    const nodes = new Map(); // slug -> node data
-    const edges = []; // { from, to }
+    // BFS graph expansion using career_paths.next_roles
+    const nodesMap = new Map();
+    const links = [];
 
-    const queue = [{ slug: String(root.slug).toLowerCase(), d: 0 }];
-    const visited = new Set([String(root.slug).toLowerCase()]);
+    nodesMap.set(root.slug, pickRoleFields(root));
+
+    const queue = [{ slug: root.slug, level: 0 }];
+    const visited = new Set([root.slug]);
 
     while (queue.length) {
-      const { slug: cur, d } = queue.shift();
+      const { slug: currentSlug, level } = queue.shift();
+      if (level >= maxDepth) continue;
 
-      const roleObj = bySlug(roles, cur);
-      if (roleObj && !nodes.has(cur)) {
-        nodes.set(cur, {
-          slug: roleObj.slug,
-          title: roleObj.title,
-          category: roleObj.category,
-          seniority: roleObj.seniority,
-        });
-      }
+      const current = bySlug.get(currentSlug);
+      if (!current) continue;
 
-      if (d >= maxDepth) continue;
+      const next = current?.career_paths?.next_roles || [];
+      if (!Array.isArray(next)) continue;
 
-      const nxt = adj.get(cur) || [];
-      for (const n of nxt) {
-        edges.push({ from: cur, to: n });
+      for (const nextSlug of next) {
+        const target = bySlug.get(nextSlug);
+        if (!target) continue;
 
-        if (!visited.has(n)) {
-          visited.add(n);
-          queue.push({ slug: n, d: d + 1 });
+        // add node
+        if (!nodesMap.has(target.slug)) {
+          nodesMap.set(target.slug, pickRoleFields(target));
         }
 
-        // Add node details if present
-        const nextRoleObj = bySlug(roles, n);
-        if (nextRoleObj && !nodes.has(n)) {
-          nodes.set(n, {
-            slug: nextRoleObj.slug,
-            title: nextRoleObj.title,
-            category: nextRoleObj.category,
-            seniority: nextRoleObj.seniority,
-          });
+        // add link
+        links.push({
+          source: currentSlug,
+          target: target.slug,
+          type: "next_role",
+        });
+
+        // continue BFS
+        if (!visited.has(target.slug)) {
+          visited.add(target.slug);
+          queue.push({ slug: target.slug, level: level + 1 });
         }
       }
     }
 
+    const nodes = Array.from(nodesMap.values());
+
     return res.status(200).json({
-      root: {
-        slug: root.slug,
-        title: root.title,
-        category: root.category,
-        seniority: root.seniority,
-      },
+      version: "1.0.0",
+      root: pickRoleFields(root),
       depth: maxDepth,
-      node_count: nodes.size,
-      edge_count: edges.length,
-      nodes: Array.from(nodes.values()),
-      edges,
+      nodes,
+      links,
     });
-  } catch (e) {
+  } catch (err) {
     return res.status(500).json({
       error: "Failed to build role graph",
-      details: e?.message || String(e),
+      details: err?.message || String(err),
     });
   }
 }
