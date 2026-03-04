@@ -1,4 +1,4 @@
-mport fs from "fs";
+import fs from "fs";
 import path from "path";
 
 let cached = null;
@@ -23,13 +23,12 @@ export default function handler(req, res) {
       seniority,
       limit = "25",
       offset = "0",
-    } = req.query;
+    } = req.query || {};
 
     // 1) exact lookup by slug
     if (slug) {
-      const found = roles.find(
-        (r) => r.slug === String(slug).trim().toLowerCase()
-      );
+      const wanted = String(slug).trim().toLowerCase();
+      const found = roles.find((r) => String(r.slug).toLowerCase() === wanted);
 
       if (!found) return res.status(404).json({ error: "Role not found" });
 
@@ -51,8 +50,8 @@ export default function handler(req, res) {
       const qq = String(q).trim().toLowerCase();
       results = results.filter(
         (r) =>
-          r.title.toLowerCase().includes(qq) ||
-          r.slug.toLowerCase().includes(qq) ||
+          String(r.title).toLowerCase().includes(qq) ||
+          String(r.slug).toLowerCase().includes(qq) ||
           (Array.isArray(r.skills) &&
             r.skills.some((s) => String(s).toLowerCase().includes(qq)))
       );
