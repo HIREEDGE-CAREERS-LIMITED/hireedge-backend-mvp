@@ -1,4 +1,8 @@
-[
+{
+  "dataset_name": "HireEdge Role Intelligence Dataset",
+  "version": "1.0",
+  "description": "Structured role taxonomy used by HireEdge Career Intelligence Engines for role matching, skill gap analysis and career pathway modelling.",
+  "roles": [
   {"slug":"data-analyst","title":"Data Analyst","category":"Data & AI","seniority":"Mid"},
   {"slug":"senior-data-analyst","title":"Senior Data Analyst","category":"Data & AI","seniority":"Senior"},
   {"slug":"data-scientist","title":"Data Scientist","category":"Data & AI","seniority":"Mid"},
@@ -391,4 +395,5 @@
   {"slug":"database-administrator","title":"Database Administrator","category":"Software Engineering","seniority":"Mid"},
   {"slug":"solutions-engineer","title":"Solutions Engineer","category":"Software Engineering","seniority":"Mid"},
   {"slug":"technical-account-manager","title":"Technical Account Manager","category":"Sales","seniority":"Manager"}
-]
+  ]
+}
