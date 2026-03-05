@@ -1,68 +1,19 @@
-import rolesData from "../data/roles-enriched.json";
+// Stable role-path API (BFS shortest path)
+// Uses require() for JSON so Vercel bundles it correctly (no fs crashes)
 
-function normSlug(s) {
-  if (!s) return "";
-  return String(s)
+const dataset = require("../data/roles-enriched.json");
+
+function normalizeSlug(s) {
+  return String(s || "")
     .trim()
     .toLowerCase()
-    .replace(/_/g, "-")
     .replace(/\s+/g, "-");
 }
 
-function buildIndex(rolesArr) {
-  const map = new Map();
-  for (const r of rolesArr) map.set(r.slug, r);
-  return map;
-}
-
-function bfsPath(from, to, index) {
-  // Standard BFS for shortest path
-  const queue = [from];
-  const visited = new Set([from]);
-  const parent = new Map(); // child -> parent
-
-  while (queue.length) {
-    const cur = queue.shift();
-    if (cur === to) break;
-
-    const role = index.get(cur);
-    const next = role?.career_paths?.next_roles || [];
-
-    for (const nxt of next) {
-      if (!index.has(nxt)) continue;
-      if (visited.has(nxt)) continue;
-      visited.add(nxt);
-      parent.set(nxt, cur);
-      queue.push(nxt);
-    }
-  }
-
-  if (!visited.has(to)) return null;
-
-  // Reconstruct path
-  const path = [];
-  let cur = to;
-  while (cur) {
-    path.push(cur);
-    cur = parent.get(cur);
-    if (cur === from) {
-      path.push(from);
-      break;
-    }
-  }
-  return path.reverse();
-}
-
-export default function handler(req, res) {
+module.exports = (req, res) => {
   try {
-    const roles = rolesData.roles || [];
-    const index = buildIndex(roles);
-
-    const fromRaw = req.query.from;
-    const toRaw = req.query.to;
-
-    const from = normSlug(fromRaw);
-    const to = normSlug(toRaw);
+    const from = normalizeSlug(req.query.from);
+    const to = normalizeSlug(req.query.to);
 
     if (!from || !to) {
       return res.status(400).json({
@@ -71,28 +22,63 @@ export default function handler(req, res) {
       });
     }
 
-    if (!index.has(from)) {
+    const roles = dataset.roles || [];
+    const bySlug = new Map(roles.map((r) => [r.slug, r]));
+
+    if (!bySlug.has(from)) {
       return res.status(404).json({ error: "FROM role not found", from });
     }
-    if (!index.has(to)) {
+    if (!bySlug.has(to)) {
       return res.status(404).json({ error: "TO role not found", to });
     }
 
-    const slugPath = bfsPath(from, to, index);
+    // adjacency list: slug -> next roles
+    const adj = new Map();
+    for (const r of roles) {
+      const next = (r.career_paths?.next_roles || []).filter(Boolean);
+      adj.set(r.slug, next);
+    }
 
-    if (!slugPath) {
-      const fromRole = index.get(from);
-      const suggestions = fromRole?.career_paths?.next_roles || [];
+    // BFS
+    const queue = [from];
+    const prev = new Map();
+    const seen = new Set([from]);
+
+    while (queue.length) {
+      const cur = queue.shift();
+      if (cur === to) break;
+
+      const nexts = adj.get(cur) || [];
+      for (const n of nexts) {
+        if (!bySlug.has(n)) continue;
+        if (seen.has(n)) continue;
+        seen.add(n);
+        prev.set(n, cur);
+        queue.push(n);
+      }
+    }
+
+    if (!seen.has(to)) {
       return res.status(404).json({
-        error: "No career path found between roles (multi-step)",
+        error: "No path found",
         from,
         to,
-        suggestions,
+        suggestions: (bySlug.get(from).career_paths?.next_roles || []).slice(0, 10),
       });
     }
 
-    const nodes = slugPath.map((slug) => {
-      const r = index.get(slug);
+    // rebuild path
+    const pathSlugs = [];
+    let cur = to;
+    while (cur) {
+      pathSlugs.push(cur);
+      if (cur === from) break;
+      cur = prev.get(cur);
+    }
+    pathSlugs.reverse();
+
+    const steps = pathSlugs.map((slug) => {
+      const r = bySlug.get(slug);
       return {
         slug: r.slug,
         title: r.title,
@@ -104,11 +90,13 @@ export default function handler(req, res) {
     return res.status(200).json({
       from,
       to,
-      steps: nodes.length - 1,
-      path: nodes,
-      slugs: slugPath,
+      steps_count: steps.length,
+      steps,
     });
-  } catch (e) {
-    return res.status(500).json({ error: "Server error", detail: String(e) });
+  } catch (err) {
+    return res.status(500).json({
+      error: "Backend role-path failed",
+      detail: String(err?.message || err),
+    });
   }
-}
+};
