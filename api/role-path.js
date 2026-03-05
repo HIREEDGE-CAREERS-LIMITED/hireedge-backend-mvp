@@ -1,107 +1,114 @@
-import fs from "fs";
-import path from "path";
+import rolesData from "../data/roles-enriched.json";
 
-let cached = null;
-
-function loadRoles() {
-  if (cached) return cached;
-  const filePath = path.join(process.cwd(), "data", "roles-enriched.json");
-  const raw = fs.readFileSync(filePath, "utf8");
-  const json = JSON.parse(raw);
-  cached = Array.isArray(json) ? json : Array.isArray(json?.results) ? json.results : [];
-  return cached;
+function normSlug(s) {
+  if (!s) return "";
+  return String(s)
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-")
+    .replace(/\s+/g, "-");
 }
 
-function bySlug(roles, slug) {
-  const s = String(slug || "").trim().toLowerCase();
-  return roles.find((r) => String(r.slug).toLowerCase() === s);
+function buildIndex(rolesArr) {
+  const map = new Map();
+  for (const r of rolesArr) map.set(r.slug, r);
+  return map;
+}
+
+function bfsPath(from, to, index) {
+  // Standard BFS for shortest path
+  const queue = [from];
+  const visited = new Set([from]);
+  const parent = new Map(); // child -> parent
+
+  while (queue.length) {
+    const cur = queue.shift();
+    if (cur === to) break;
+
+    const role = index.get(cur);
+    const next = role?.career_paths?.next_roles || [];
+
+    for (const nxt of next) {
+      if (!index.has(nxt)) continue;
+      if (visited.has(nxt)) continue;
+      visited.add(nxt);
+      parent.set(nxt, cur);
+      queue.push(nxt);
+    }
+  }
+
+  if (!visited.has(to)) return null;
+
+  // Reconstruct path
+  const path = [];
+  let cur = to;
+  while (cur) {
+    path.push(cur);
+    cur = parent.get(cur);
+    if (cur === from) {
+      path.push(from);
+      break;
+    }
+  }
+  return path.reverse();
 }
 
 export default function handler(req, res) {
   try {
-    const roles = loadRoles();
-    const { from, to } = req.query;
+    const roles = rolesData.roles || [];
+    const index = buildIndex(roles);
+
+    const fromRaw = req.query.from;
+    const toRaw = req.query.to;
+
+    const from = normSlug(fromRaw);
+    const to = normSlug(toRaw);
 
     if (!from || !to) {
-      return res.status(400).json({ error: "Use ?from=data-analyst&to=analytics-manager" });
-    }
-
-    const start = bySlug(roles, from);
-    const goal = bySlug(roles, to);
-
-    if (!start) return res.status(404).json({ error: "FROM role not found" });
-    if (!goal) return res.status(404).json({ error: "TO role not found" });
-
-    // Build adjacency
-    const adj = new Map();
-    for (const r of roles) {
-      const key = String(r.slug || "").toLowerCase();
-      const next = r?.career_paths?.next_roles || [];
-      const nextArr = Array.isArray(next) ? next.map((x) => String(x).toLowerCase()) : [];
-      adj.set(key, nextArr);
-    }
-
-    // BFS shortest path
-    const startSlug = String(start.slug).toLowerCase();
-    const goalSlug = String(goal.slug).toLowerCase();
-
-    const queue = [startSlug];
-    const parent = new Map(); // child -> parent
-    parent.set(startSlug, null);
-
-    while (queue.length) {
-      const cur = queue.shift();
-      if (cur === goalSlug) break;
-
-      const nxt = adj.get(cur) || [];
-      for (const n of nxt) {
-        if (!parent.has(n)) {
-          parent.set(n, cur);
-          queue.push(n);
-        }
-      }
-    }
-
-    if (!parent.has(goalSlug)) {
-      return res.status(200).json({
-        found: false,
-        from: start.slug,
-        to: goal.slug,
-        path: [],
-        message: "No path found using next_roles links",
+      return res.status(400).json({
+        error: "Missing required query params: from, to",
+        example: "/api/role-path?from=data-analyst&to=product-manager",
       });
     }
 
-    // Reconstruct
-    const pathSlugs = [];
-    let cur = goalSlug;
-    while (cur) {
-      pathSlugs.push(cur);
-      cur = parent.get(cur);
+    if (!index.has(from)) {
+      return res.status(404).json({ error: "FROM role not found", from });
     }
-    pathSlugs.reverse();
+    if (!index.has(to)) {
+      return res.status(404).json({ error: "TO role not found", to });
+    }
 
-    const pathRoles = pathSlugs
-      .map((s) => bySlug(roles, s))
-      .filter(Boolean)
-      .map((r) => ({
+    const slugPath = bfsPath(from, to, index);
+
+    if (!slugPath) {
+      const fromRole = index.get(from);
+      const suggestions = fromRole?.career_paths?.next_roles || [];
+      return res.status(404).json({
+        error: "No career path found between roles (multi-step)",
+        from,
+        to,
+        suggestions,
+      });
+    }
+
+    const nodes = slugPath.map((slug) => {
+      const r = index.get(slug);
+      return {
         slug: r.slug,
         title: r.title,
         category: r.category,
         seniority: r.seniority,
-      }));
+      };
+    });
 
     return res.status(200).json({
-      found: true,
-      from: start.slug,
-      to: goal.slug,
-      steps: pathRoles.length - 1,
-      path: pathRoles,
+      from,
+      to,
+      steps: nodes.length - 1,
+      path: nodes,
+      slugs: slugPath,
     });
   } catch (e) {
-    return res.status(500).json({
-      error: "Failed to compute role path",
-      details: e?.message || String(e),
-    });
+    return res.status(500).json({ error: "Server error", detail: String(e) });
   }
 }
