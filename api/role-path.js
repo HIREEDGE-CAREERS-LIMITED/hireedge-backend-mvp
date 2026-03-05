@@ -1,9 +1,5 @@
-// api/role-path.js
-// Returns a career path from one role slug to another using BFS over next_roles
-// Always returns JSON (never plain text), so frontend proxy won't break.
-
-const fs = require("fs");
-const path = require("path");
+import fs from "fs";
+import path from "path";
 
 let CACHE = null;
 
@@ -14,8 +10,6 @@ function loadDataset() {
   const raw = fs.readFileSync(filePath, "utf8");
   const json = JSON.parse(raw);
 
-  // Support both shapes:
-  // { roles: [...] } OR { results: [...] } OR [...]
   const rolesArray = Array.isArray(json) ? json : (json.roles || json.results || []);
   const bySlug = new Map(rolesArray.map((r) => [r.slug, r]));
 
@@ -37,7 +31,7 @@ function bfsPath(bySlug, start, goal, maxDepth = 10) {
     const node = bySlug.get(last);
     if (!node) continue;
 
-    const next = (node.career_paths && node.career_paths.next_roles) ? node.career_paths.next_roles : [];
+    const next = node?.career_paths?.next_roles || [];
     for (const n of next) {
       if (!n || visited.has(n)) continue;
       visited.add(n);
@@ -47,11 +41,10 @@ function bfsPath(bySlug, start, goal, maxDepth = 10) {
       queue.push(newPath);
     }
   }
-
   return null;
 }
 
-module.exports = (req, res) => {
+export default function handler(req, res) {
   try {
     const { from, to, maxDepth } = req.query || {};
 
@@ -65,12 +58,8 @@ module.exports = (req, res) => {
 
     const { bySlug } = loadDataset();
 
-    if (!bySlug.has(from)) {
-      return res.status(404).json({ error: "FROM role not found", from });
-    }
-    if (!bySlug.has(to)) {
-      return res.status(404).json({ error: "TO role not found", to });
-    }
+    if (!bySlug.has(from)) return res.status(404).json({ error: "FROM role not found", from });
+    if (!bySlug.has(to)) return res.status(404).json({ error: "TO role not found", to });
 
     const depth = Number.isFinite(Number(maxDepth)) ? Number(maxDepth) : 10;
     const pathSlugs = bfsPath(bySlug, from, to, depth);
@@ -86,7 +75,6 @@ module.exports = (req, res) => {
       });
     }
 
-    // return full node objects too (useful for frontend)
     const pathRoles = pathSlugs.map((s) => bySlug.get(s));
 
     return res.status(200).json({
@@ -99,10 +87,9 @@ module.exports = (req, res) => {
       roles: pathRoles,
     });
   } catch (e) {
-    // ALWAYS JSON even on crash
     return res.status(500).json({
       error: "Internal server error in role-path",
-      detail: String(e && e.stack ? e.stack : e),
+      detail: String(e?.stack || e),
     });
   }
-};
+}
