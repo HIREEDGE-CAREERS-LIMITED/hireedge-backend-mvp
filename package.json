@@ -6,7 +6,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "echo \"No tests yet\""
+    "test": "echo \"No tests yet\"",
+    "validate:roles": "node scripts/validate-roles.cjs",
+    "validate:roles:verbose": "node scripts/validate-roles.cjs --verbose"
   },
   "dependencies": {
     "axios": "^1.7.0",

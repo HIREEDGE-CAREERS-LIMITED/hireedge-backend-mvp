@@ -1,7 +1,9 @@
-// /api/career-pack.js
 import OpenAI from "openai";
 
-// Fixed domains we always allow
+// ─────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────
+
 const FIXED_ORIGINS = [
   "https://hireedge.co.uk",
   "https://www.hireedge.co.uk",
@@ -10,27 +12,215 @@ const FIXED_ORIGINS = [
   "http://localhost:3000",
 ];
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-export default async function handler(req, res) {
-  // ----- CORS -----
+// ─────────────────────────────────────────────────────────────
+// CORS
+// ─────────────────────────────────────────────────────────────
+
+function applyCors(req, res) {
   const origin = req.headers.origin || "";
   let allowedOrigin = FIXED_ORIGINS[0];
 
-  // Allow fixed origins + any *.vercel.app deployment
-  if (
-    origin &&
-    (FIXED_ORIGINS.includes(origin) || origin.endsWith(".vercel.app"))
-  ) {
+  if (origin && (FIXED_ORIGINS.includes(origin) || origin.endsWith(".vercel.app"))) {
     allowedOrigin = origin;
   }
 
   res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Vary", "Origin");
+}
+
+// ─────────────────────────────────────────────────────────────
+// JSON parsing helper
+// ─────────────────────────────────────────────────────────────
+
+function safeParseJson(raw) {
+  let text = (raw || "").trim();
+
+  if (text.startsWith("```")) {
+    text = text.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "").trim();
+  }
+
+  try {
+    return { ok: true, data: JSON.parse(text) };
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return { ok: true, data: JSON.parse(match[0]) };
+      } catch {
+        return { ok: false, raw: text };
+      }
+    }
+    return { ok: false, raw: text };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Career Intelligence Layer helpers
+// ─────────────────────────────────────────────────────────────
+
+function slugifyRole(value) {
+  if (!value || typeof value !== "string") return "";
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function getBaseUrl(req) {
+  const proto = req.headers["x-forwarded-proto"] || "http";
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000";
+  return `${proto}://${host}`;
+}
+
+async function fetchRoleIntelligence(slug, baseUrl) {
+  if (!slug) return null;
+  try {
+    const res = await fetch(
+      `${baseUrl}/api/role-intelligence?slug=${encodeURIComponent(slug)}`,
+      {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    return data?.error ? null : data;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchSkillsMatching(payload, baseUrl, authHeader) {
+  try {
+    const res = await fetch(`${baseUrl}/api/skills-matching`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authHeader ? { Authorization: authHeader } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    return data?.ok ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCareerRoadmap(payload, baseUrl, authHeader) {
+  try {
+    const res = await fetch(`${baseUrl}/api/career-roadmap`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authHeader ? { Authorization: authHeader } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    return data?.ok ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatSalary(salary_uk) {
+  if (!salary_uk || typeof salary_uk !== "object") return null;
+  const { min, max, mean } = salary_uk;
+  if (!min && !max && !mean) return null;
+
+  const parts = [];
+  if (mean) parts.push(`typical £${mean.toLocaleString("en-GB")}`);
+  if (min && max) parts.push(`range £${min.toLocaleString("en-GB")}–£${max.toLocaleString("en-GB")}`);
+
+  return parts.length ? parts.join(", ") : null;
+}
+
+function buildPackContextSection({ roleData, skillsData, roadmapData }) {
+  const lines = [];
+
+  if (roleData) {
+    lines.push("TARGET ROLE INTELLIGENCE (structured data from HireEdge dataset):");
+    lines.push(`  Title:     ${roleData.title || ""}`);
+    lines.push(`  Category:  ${roleData.category || ""}`);
+    lines.push(`  Seniority: ${roleData.seniority || ""}`);
+    if (roleData.skills?.length) {
+      lines.push(`  Required skills: ${roleData.skills.join(", ")}`);
+    }
+    const sal = formatSalary(roleData.salary_uk);
+    if (sal) lines.push(`  UK Salary: ${sal}`);
+    if (roleData.career_paths?.next_roles?.length) {
+      lines.push(`  Typical next roles: ${roleData.career_paths.next_roles.slice(0, 4).join(", ")}`);
+    }
+    if (roleData.career_paths?.previous_roles?.length) {
+      lines.push(`  Common entry routes: ${roleData.career_paths.previous_roles.slice(0, 3).join(", ")}`);
+    }
+    lines.push("");
+  }
+
+  if (skillsData) {
+    lines.push("SKILLS GAP ANALYSIS (from HireEdge Skills Matching engine):");
+    if (skillsData.overallFit != null) {
+      lines.push(`  Overall fit: ${skillsData.overallFit}%`);
+    }
+    if (skillsData.gapSummary) {
+      lines.push(`  Summary: ${skillsData.gapSummary}`);
+    }
+    if (skillsData.matchedSkills?.length) {
+      lines.push(`  Matched skills: ${skillsData.matchedSkills.join(", ")}`);
+    }
+    if (skillsData.partialMatchSkills?.length) {
+      lines.push(`  Partial matches: ${skillsData.partialMatchSkills.join(", ")}`);
+    }
+    if (skillsData.missingSkills?.length) {
+      lines.push(`  Missing skills: ${skillsData.missingSkills.join(", ")}`);
+    }
+    lines.push("");
+  }
+
+  if (roadmapData?.roadmap) {
+    const rm = roadmapData.roadmap;
+    lines.push("CAREER ROADMAP (from HireEdge Roadmap engine):");
+    if (rm.summary) lines.push(`  Summary: ${rm.summary}`);
+    if (rm.timeframe_months) lines.push(`  Timeframe: ${rm.timeframe_months} months`);
+    if (rm.skills_in_order?.length) {
+      lines.push(`  Key skills in order: ${rm.skills_in_order.slice(0, 8).join(", ")}`);
+    }
+    if (rm.target_roles?.length) {
+      lines.push(`  Target roles: ${rm.target_roles.join(", ")}`);
+    }
+    lines.push("");
+
+    if (roadmapData.role_path?.path?.length) {
+      lines.push(`STRUCTURED PATH: ${roadmapData.role_path.path.join(" → ")}`);
+      lines.push("");
+    }
+  }
+
+  return lines.join("\n").trim();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Route handler
+// ─────────────────────────────────────────────────────────────
+
+export default async function handler(req, res) {
+  applyCors(req, res);
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
@@ -41,8 +231,9 @@ export default async function handler(req, res) {
   }
 
   try {
+    const body = req.body || {};
+
     const {
-      // core career info
       fullName,
       currentRole,
       targetRole,
@@ -52,41 +243,89 @@ export default async function handler(req, res) {
       jobDescription,
       jobText,
       cvText,
-
-      // extra inputs so Pack can mimic other engines
-      careerGoal,        // "Sales Manager in UK retail within 6–12 months"
-      visaStatus,        // "Student visa, expiring 2026"
-      targetCountry,     // "UK"
-      visaMainGoal,      // "Work and settle long term"
-      gapDetails,        // type of gap, dates, reason, what you did
-      profileHighlights, // strengths / achievements
-      preferredSectors,  // text or comma-separated
-      salaryRange,       // optional
-    } = req.body || {};
+      careerGoal,
+      visaStatus,
+      targetCountry,
+      visaMainGoal,
+      gapDetails,
+      profileHighlights,
+      preferredSectors,
+      salaryRange,
+    } = body;
 
     if (!cvText) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "cvText is required for analysis" });
+      return res.status(400).json({
+        ok: false,
+        error: "cvText is required for analysis",
+      });
     }
 
-    const safeFullName     = fullName || "Candidate";
-    const safeCurrent      = currentRole || "Not specified";
-    const safeTarget       = targetRole || "Not specified";
-    const safeYears        = yearsExperience || "Not specified";
-    const safeSector       = sector || "Not specified";
-    const safeLocation     = location || "Not specified";
-    const safeJobDesc      = jobDescription || jobText || "Not provided";
-    const safeGoal         = careerGoal || "Not specified";
-    const safeVisaStatus   = visaStatus || "Not specified";
-    const safeTargetCtry   = targetCountry || "UK";
-    const safeVisaGoal     = visaMainGoal || "Work on a sponsored skilled role";
-    const safeGapDetails   = gapDetails || "Candidate has no major career gaps or prefers not to highlight them.";
-    const safeHighlights   = profileHighlights || "Use the CV to infer strengths, achievements and impact.";
-    const safePrefSectors  = preferredSectors || safeSector;
-    const safeSalary       = salaryRange || "Not specified";
+    const safeFullName = fullName || "Candidate";
+    const safeCurrent = currentRole || "Not specified";
+    const safeTarget = targetRole || "Not specified";
+    const safeYears = yearsExperience || "Not specified";
+    const safeSector = sector || "Not specified";
+    const safeLocation = location || "Not specified";
+    const safeJobDesc = jobDescription || jobText || "Not provided";
+    const safeGoal = careerGoal || "Not specified";
+    const safeVisaStatus = visaStatus || "Not specified";
+    const safeTargetCtry = targetCountry || "UK";
+    const safeVisaGoal = visaMainGoal || "Work on a sponsored skilled role";
+    const safeGapDetails =
+      gapDetails || "Candidate has no major career gaps or prefers not to highlight them.";
+    const safeHighlights =
+      profileHighlights || "Use the CV to infer strengths, achievements and impact.";
+    const safePrefSectors = preferredSectors || safeSector;
+    const safeSalary = salaryRange || "Not specified";
 
-    // 🔹 One prompt that drives all 8 engines + Pack (9th)
+    const baseUrl = getBaseUrl(req);
+    const authHeader = req.headers.authorization || "";
+    const targetSlug = slugifyRole(safeTarget);
+
+    const derivedSkills =
+      Array.isArray(body.skills) && body.skills.length
+        ? body.skills
+        : [safeCurrent, safeSector].filter((s) => s && s !== "Not specified");
+
+    const [roleData, skillsData, roadmapData] = await Promise.all([
+      fetchRoleIntelligence(targetSlug, baseUrl),
+      cvText
+        ? fetchSkillsMatching(
+            {
+              targetRole: safeTarget,
+              cvText,
+              jobDescription: safeJobDesc,
+            },
+            baseUrl,
+            authHeader
+          )
+        : Promise.resolve(null),
+      safeCurrent !== "Not specified" && safeTarget !== "Not specified"
+        ? fetchCareerRoadmap(
+            {
+              currentRole: safeCurrent,
+              targetRole: safeTarget,
+              yearsExperience: safeYears,
+              skills: derivedSkills,
+            },
+            baseUrl,
+            authHeader
+          )
+        : Promise.resolve(null),
+    ]);
+
+    const enginesUsed = [
+      roleData ? "role-intelligence" : null,
+      skillsData ? "skills-matching" : null,
+      roadmapData ? "career-roadmap" : null,
+    ].filter(Boolean);
+
+    const intelligenceSection = buildPackContextSection({
+      roleData,
+      skillsData,
+      roadmapData,
+    });
+
     const systemPrompt = `
 You are HireEdge's One-Click Career Pack Engine.
 
@@ -178,7 +417,6 @@ You MUST return ONLY valid JSON with this EXACT structure and keys:
 }
 
 ENGINE MAPPING:
-
 - "pack"     -> One-Click Career Pack main summary (top of /pack page).
 - "ats"      -> ATS Resume Optimiser (/resume + pack section).
 - "skills"   -> Skills Match & Gap (/skills + pack section).
@@ -192,12 +430,13 @@ ENGINE MAPPING:
 
 RULES:
 - Use ALL structured inputs plus the full CV and job description.
+- Prioritise the Career Intelligence data provided below when it is available — it is sourced from real UK job market data and should ground your recommendations.
 - Be concrete, UK-job-market realistic and endorsement-friendly.
 - Do NOT invent impossible visa routes or legal guarantees.
 - Do NOT include ANY keys outside the schema above.
 - Do NOT wrap the JSON in markdown.
 - Do NOT write comments or explanations.
-    `.trim();
+`.trim();
 
     const userPrompt = `
 CANDIDATE CORE INFO
@@ -227,56 +466,47 @@ ${safeJobDesc}
 
 FULL CV TEXT
 ${cvText}
-    `.trim();
+${intelligenceSection ? `\nCAREER INTELLIGENCE LAYER DATA\n${intelligenceSection}` : ""}
+`.trim();
 
     const response = await client.responses.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4o-mini",
       input: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
     });
 
-    let jsonText = response.output?.[0]?.content?.[0]?.text?.trim() ?? "";
+    const rawText = (response.output_text || "").trim();
+    const parsed = safeParseJson(rawText);
 
-    // Strip ```json fences if the model adds them
-    if (jsonText.startsWith("```")) {
-      jsonText = jsonText
-        .replace(/^```[a-zA-Z]*\n?/, "")
-        .replace(/```$/, "");
+    if (!parsed.ok) {
+      return res.status(200).json({
+        ok: false,
+        error: "Failed to parse AI response",
+        rawText: parsed.raw,
+      });
     }
 
-    let data;
-    try {
-      data = JSON.parse(jsonText);
-    } catch {
-      const match = jsonText.match(/\{[\s\S]*\}/);
-      if (match) {
-        try {
-          data = JSON.parse(match[0]);
-        } catch {
-          return res.status(200).json({
-            ok: false,
-            error: "Failed to parse AI response",
-            rawText: jsonText,
-          });
-        }
-      } else {
-        return res.status(200).json({
-          ok: false,
-          error: "Failed to parse AI response",
-          rawText: jsonText,
-        });
-      }
-    }
-
+    const data = parsed.data;
     if (typeof data.ok !== "boolean") {
       data.ok = true;
     }
 
+    data.meta = {
+      engines_used: enginesUsed,
+      role_intelligence: roleData
+        ? {
+            slug: roleData.slug,
+            title: roleData.title,
+            category: roleData.category,
+          }
+        : null,
+    };
+
     return res.status(200).json(data);
   } catch (err) {
-    console.error("career-pack error", err);
+    console.error("career-pack error:", err?.message || err);
     return res.status(200).json({
       ok: false,
       error: "Server error while generating career pack",

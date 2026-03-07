@@ -1,123 +1,284 @@
 import fs from "fs";
 import path from "path";
 
-let cached = null;
+// ─────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────
+
+const DATASET_PATH = path.join(process.cwd(), "data", "roles-enriched.json");
+
+const DEFAULT_LIMIT = 25;
+const MAX_LIMIT     = 100;
+
+const META = {
+  version:      "2.0.0",
+  source:       "HireEdge Role Intelligence Dataset (internal)",
+  last_updated: null, // filled at load time from dataset, see loadDataset()
+};
+
+// ─────────────────────────────────────────────────────────────
+// Dataset loader  (cached after first read)
+// ─────────────────────────────────────────────────────────────
+
+let _cache = null;
 
 /**
- * Loads roles data safely from JSON file.
- * Supports:
- *  - Array: [ {...}, {...} ]
- *  - Object wrappers: { roles: [...] } or { results: [...] } or { data: [...] }
+ * Reads and caches the dataset.
+ * Throws a structured Error if the file is missing, unreadable,
+ * or does not contain a recognisable roles array.
+ *
+ * @returns {{ roles: object[], meta: object }}
  */
-function loadEnrichedRoles() {
-  if (cached) return cached;
+function loadDataset() {
+  if (_cache) return _cache;
 
-  // ✅ IMPORTANT: Your file name is roles-enriched.json (as per your data folder)
-  const filePath = path.join(process.cwd(), "data", "roles-enriched.json");
+  let raw;
+  try {
+    raw = fs.readFileSync(DATASET_PATH, "utf8");
+  } catch {
+    throw new Error("Dataset file could not be read.");
+  }
 
-  const raw = fs.readFileSync(filePath, "utf8");
-  const parsed = JSON.parse(raw);
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("Dataset file contains invalid JSON.");
+  }
 
-  // ✅ Ensure we always return an ARRAY
-  const rolesArr = Array.isArray(parsed)
+  // Support both a bare array and the structured-object format
+  // (the HireEdge v3+ format is always { roles: [...], ... })
+  const roles = Array.isArray(parsed)
     ? parsed
-    : parsed.roles || parsed.results || parsed.data || [];
+    : Array.isArray(parsed.roles)   ? parsed.roles
+    : Array.isArray(parsed.results) ? parsed.results
+    : Array.isArray(parsed.data)    ? parsed.data
+    : null;
 
-  cached = rolesArr;
-  return cached;
+  if (!roles) {
+    throw new Error("Dataset does not contain a recognisable roles array.");
+  }
+
+  _cache = {
+    roles,
+    meta: {
+      ...META,
+      last_updated: parsed.last_updated ?? new Date().toISOString(),
+    },
+  };
+
+  return _cache;
 }
 
-export default function handler(req, res) {
-  try {
-    const roles = loadEnrichedRoles();
+// ─────────────────────────────────────────────────────────────
+// Small pure helpers
+// ─────────────────────────────────────────────────────────────
 
+/**
+ * Lower-case + trim a potential slug / query string safely.
+ * Returns "" if the value is not a usable string.
+ */
+function normalizeSlug(value) {
+  if (value == null) return "";
+  return String(value).trim().toLowerCase();
+}
+
+/**
+ * Converts a slug like "senior-data-analyst" into "Senior Data Analyst".
+ * Used as a fallback title when the role record lacks one.
+ */
+function titleFromSlug(slug) {
+  return String(slug)
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/**
+ * Produces a guaranteed-safe, fully-populated role object.
+ * Every field has a fallback so callers never need to null-check.
+ *
+ * @param {object} raw  - The raw role record from the dataset
+ * @returns {object}    - A clean role object with all required fields
+ */
+function safeRole(raw) {
+  const slug = normalizeSlug(raw.slug) || "unknown";
+  return {
+    slug,
+    title:        raw.title      || titleFromSlug(slug),
+    category:     raw.category   || "Other",
+    seniority:    raw.seniority  || "Not specified",
+    skills:       Array.isArray(raw.skills) ? raw.skills : [],
+    salary_uk:    raw.salary_uk  ?? null,
+    career_paths: {
+      next_roles:     Array.isArray(raw.career_paths?.next_roles)     ? raw.career_paths.next_roles     : [],
+      previous_roles: Array.isArray(raw.career_paths?.previous_roles) ? raw.career_paths.previous_roles : [],
+    },
+    uk_soc_2020:  raw.uk_soc_2020 ?? null,
+  };
+}
+
+/**
+ * Returns the lightweight shape used in related_roles and suggestions.
+ *
+ * @param {object} raw
+ * @returns {{ slug: string, title: string, category: string, seniority: string }}
+ */
+function slimRole(raw) {
+  const slug = normalizeSlug(raw.slug) || "unknown";
+  return {
+    slug,
+    title:     raw.title     || titleFromSlug(slug),
+    category:  raw.category  || "Other",
+    seniority: raw.seniority || "Not specified",
+  };
+}
+
+/**
+ * Parses and clamps an integer query param.
+ *
+ * @param {string|undefined} value   - Raw query-string value
+ * @param {number}           def     - Default if unparseable
+ * @param {number}           min     - Inclusive floor
+ * @param {number}           max     - Inclusive ceiling
+ * @returns {number}
+ */
+function safePosInt(value, def, min, max) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(Math.max(n, min), max);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Route handler
+// ─────────────────────────────────────────────────────────────
+
+export default function handler(req, res) {
+  // ── Method guard ──────────────────────────────────────────
+  if (req.method !== "GET") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // ── Load dataset ──────────────────────────────────────────
+  let roles, meta;
+  try {
+    ({ roles, meta } = loadDataset());
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to load role dataset" });
+  }
+
+  try {
+    // ── Parse query params ──────────────────────────────────
+    //
+    //  slug  – primary lookup key  (preferred)
+    //  role  – legacy alias for slug  (backward-compatible)
+    //  q     – free-text search across title, slug, skills
+    //  category, seniority – exact-match filters
+    //  limit, offset – pagination
+    //
     const {
-      slug,
-      q,
-      category,
-      seniority,
-      limit = "25",
-      offset = "0",
+      slug:      slugParam,
+      role:      roleParam, // backward-compat alias
+      q:         qParam,
+      category:  categoryParam,
+      seniority: seniorityParam,
+      limit:     limitParam,
+      offset:    offsetParam,
     } = req.query;
 
-    // ✅ Meta info (useful for frontend)
-    const META = {
-      version: "1.0.0",
-      last_updated: new Date().toISOString(),
-      source: "HireEdge Role Intelligence Dataset (internal)",
-    };
+    // Prefer `slug`; fall back to `role` alias
+    const rawLookup = slugParam ?? roleParam ?? null;
 
-    // 1) Exact lookup by slug
-    if (slug) {
+    // ── 1) Single-role lookup ──────────────────────────────
+    if (rawLookup != null) {
+      const normalized = normalizeSlug(rawLookup);
+
+      if (!normalized) {
+        return res.status(400).json({ error: "Missing slug" });
+      }
+
       const found = roles.find(
-        (r) => String(r.slug || "").trim().toLowerCase() === String(slug).trim().toLowerCase()
+        (r) => normalizeSlug(r.slug) === normalized
       );
 
-      if (!found) return res.status(404).json({ error: "Role not found" });
+      if (!found) {
+        return res.status(404).json({ error: "Role not found" });
+      }
 
-      // ✅ Related roles (same category)
+      const roleData = safeRole(found);
+
+      // Related roles: same category, excluding self, lightweight shape
       const related = roles
         .filter(
           (r) =>
             r.category === found.category &&
-            String(r.slug || "") !== String(found.slug || "")
+            normalizeSlug(r.slug) !== normalized
         )
         .slice(0, 8)
-        .map((r) => ({
-          slug: r.slug,
-          title: r.title,
-          seniority: r.seniority,
-        }));
+        .map(slimRole);
 
       return res.status(200).json({
-        ...META,
-        ...found,
+        ...meta,
+        ...roleData,
         related_roles: related,
       });
     }
 
-    // 2) Filters + search
+    // ── 2) List / search mode ──────────────────────────────
     let results = roles;
 
-    if (category) {
-      results = results.filter((r) => r.category === category);
-    }
-
-    if (seniority) {
-      results = results.filter((r) => r.seniority === seniority);
-    }
-
-    if (q) {
-      const qq = String(q).trim().toLowerCase();
+    // Exact-match filters (case-insensitive for safety)
+    if (categoryParam) {
+      const cat = String(categoryParam).trim().toLowerCase();
       results = results.filter(
-        (r) =>
-          String(r.title || "").toLowerCase().includes(qq) ||
-          String(r.slug || "").toLowerCase().includes(qq) ||
-          (Array.isArray(r.skills) &&
-            r.skills.some((s) => String(s).toLowerCase().includes(qq)))
+        (r) => String(r.category || "").trim().toLowerCase() === cat
       );
     }
 
-    // ✅ Suggestions for autocomplete
-    const suggestions = q
-      ? results.slice(0, 8).map((r) => ({ slug: r.slug, title: r.title }))
+    if (seniorityParam) {
+      const sen = String(seniorityParam).trim().toLowerCase();
+      results = results.filter(
+        (r) => String(r.seniority || "").trim().toLowerCase() === sen
+      );
+    }
+
+    // Free-text search across title, slug, and skills
+    if (qParam) {
+      const q = String(qParam).trim().toLowerCase();
+      if (!q) {
+        return res.status(400).json({ error: "Query parameter q must not be blank" });
+      }
+      results = results.filter(
+        (r) =>
+          String(r.title || "").toLowerCase().includes(q) ||
+          String(r.slug || "").toLowerCase().includes(q) ||
+          (Array.isArray(r.skills) &&
+            r.skills.some((s) => String(s).toLowerCase().includes(q)))
+      );
+    }
+
+    // Autocomplete suggestions (only when a q is provided)
+    const suggestions = qParam
+      ? results.slice(0, 8).map(slimRole)
       : [];
 
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 25, 1), 100);
-    const off = Math.max(parseInt(offset, 10) || 0, 0);
+    // Pagination
+    const lim = safePosInt(limitParam, DEFAULT_LIMIT, 1, MAX_LIMIT);
+    const off = safePosInt(offsetParam, 0, 0, Infinity);
+
+    const page = results.slice(off, off + lim);
 
     return res.status(200).json({
-      ...META,
+      ...meta,
       total: results.length,
       limit: lim,
       offset: off,
       suggestions,
-      results: results.slice(off, off + lim),
+      results: page.map(safeRole),
     });
-  } catch (e) {
-    return res.status(500).json({
-      error: "Failed to load role dataset",
-      details: e?.message || String(e),
-    });
+
+  } catch (err) {
+    // Catch any unexpected runtime error; never leak a raw stack trace
+    return res.status(500).json({ error: "An unexpected error occurred" });
   }
 }

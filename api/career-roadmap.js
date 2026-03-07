@@ -1,20 +1,23 @@
 // /pages/api/career-roadmap.js
 import OpenAI from "openai";
-import { createClient } from "@supabase/supabase-js"; // ← ADDED
-import { getCareerContext, buildContextString, updateCareerContext } from "../../utils/careerContext"; // ← ADDED
+import { createClient } from "@supabase/supabase-js";
+import { getCareerContext, buildContextString, updateCareerContext } from "../utils/careerContext.js";
+// ─────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────
 
-// ✅ Allow both your Webflow + Vercel sites + localhost
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",
   "https://hireedge-2d4baa.webflow.io",
   "http://localhost:3000",
 ];
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ✅ CORS helper
+// ─────────────────────────────────────────────────────────────
+// Existing helpers
+// ─────────────────────────────────────────────────────────────
+
 function applyCors(req, res) {
   const origin = req.headers.origin;
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
@@ -26,16 +29,18 @@ function applyCors(req, res) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// ✅ Robust body parsing
 function getBody(req) {
   if (!req.body) return {};
   if (typeof req.body === "string") {
-    try { return JSON.parse(req.body); } catch { return {}; }
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
   }
   return req.body;
 }
 
-// ✅ Normalize skills
 function normalizeSkills(skills) {
   if (!skills) return [];
   if (Array.isArray(skills)) {
@@ -70,11 +75,11 @@ function tryParseJson(text) {
   }
 }
 
-// ← ADDED: extracts user_id from Bearer token
 async function getUserIdFromToken(req) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.replace("Bearer ", "").trim();
   if (!token) return null;
+
   try {
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -88,10 +93,162 @@ async function getUserIdFromToken(req) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+// Career Intelligence Layer helpers
+// ─────────────────────────────────────────────────────────────
+
+function slugifyRole(value) {
+  if (!value || typeof value !== "string") return "";
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function getBaseUrl(req) {
+  const proto = req.headers["x-forwarded-proto"] || "http";
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000";
+  return `${proto}://${host}`;
+}
+
+async function fetchRoleIntelligence(slug, baseUrl) {
+  if (!slug) return null;
+  try {
+    const url = `${baseUrl}/api/role-intelligence?slug=${encodeURIComponent(slug)}`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    if (data?.error) return null;
+
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRolePath(fromSlug, toSlug, baseUrl) {
+  if (!fromSlug || !toSlug) return null;
+  try {
+    const url = `${baseUrl}/api/role-path?from=${encodeURIComponent(fromSlug)}&to=${encodeURIComponent(toSlug)}`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    if (data?.error || !data?.path) return null;
+
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function formatSalary(salary_uk) {
+  if (!salary_uk || typeof salary_uk !== "object") return null;
+  const { min, max, mean } = salary_uk;
+  if (!min && !max && !mean) return null;
+
+  const parts = [];
+  if (mean) parts.push(`typical £${mean.toLocaleString("en-GB")}`);
+  if (min && max) parts.push(`range £${min.toLocaleString("en-GB")}–£${max.toLocaleString("en-GB")}`);
+
+  return parts.length ? parts.join(", ") : null;
+}
+
+function buildRoleContextSection({ currentRoleData, targetRoleData, pathData, pathRolesData }) {
+  const lines = [];
+
+  if (currentRoleData) {
+    lines.push("CURRENT ROLE INTELLIGENCE (structured data):");
+    lines.push(`  Title:     ${currentRoleData.title || ""}`);
+    lines.push(`  Category:  ${currentRoleData.category || ""}`);
+    lines.push(`  Seniority: ${currentRoleData.seniority || ""}`);
+    if (currentRoleData.skills?.length) {
+      lines.push(`  Skills:    ${currentRoleData.skills.join(", ")}`);
+    }
+    const curSalary = formatSalary(currentRoleData.salary_uk);
+    if (curSalary) lines.push(`  UK Salary: ${curSalary}`);
+    lines.push("");
+  }
+
+  if (targetRoleData) {
+    lines.push("TARGET ROLE INTELLIGENCE (structured data):");
+    lines.push(`  Title:     ${targetRoleData.title || ""}`);
+    lines.push(`  Category:  ${targetRoleData.category || ""}`);
+    lines.push(`  Seniority: ${targetRoleData.seniority || ""}`);
+    if (targetRoleData.skills?.length) {
+      lines.push(`  Required skills: ${targetRoleData.skills.join(", ")}`);
+    }
+    const tgtSalary = formatSalary(targetRoleData.salary_uk);
+    if (tgtSalary) lines.push(`  UK Salary: ${tgtSalary}`);
+    lines.push("");
+  }
+
+  if (currentRoleData?.salary_uk && targetRoleData?.salary_uk) {
+    const fromMean = currentRoleData.salary_uk.mean;
+    const toMean = targetRoleData.salary_uk.mean;
+    if (fromMean && toMean && toMean !== fromMean) {
+      const direction = toMean > fromMean ? "increase" : "decrease";
+      const delta = Math.abs(toMean - fromMean).toLocaleString("en-GB");
+      lines.push(`SALARY PROGRESSION: ${direction} of approximately £${delta} (mean) upon reaching target role.`);
+      lines.push("");
+    }
+  }
+
+  if (pathData?.path?.length) {
+    lines.push("STRUCTURED CAREER PATH (from role graph):");
+    lines.push(`  ${pathData.path.join(" → ")}`);
+    if (pathData.steps != null) lines.push(`  Steps: ${pathData.steps}`);
+    lines.push("");
+  }
+
+  if (pathRolesData.length > 0) {
+    const allSkills = pathRolesData
+      .filter((r) => r && Array.isArray(r.skills))
+      .flatMap((r) => r.skills);
+
+    const uniqueSkills = [...new Set(allSkills)];
+    if (uniqueSkills.length) {
+      lines.push("SKILLS REQUIRED ACROSS PATH ROLES:");
+      lines.push(`  ${uniqueSkills.join(", ")}`);
+      lines.push("");
+    }
+
+    const intermediates = pathRolesData.slice(1, -1).slice(0, 3);
+    if (intermediates.length) {
+      lines.push("INTERMEDIATE ROLES ON PATH:");
+      intermediates.forEach((r) => {
+        if (!r) return;
+        const sal = formatSalary(r.salary_uk);
+        lines.push(`  • ${r.title || r.slug} (${r.seniority || ""})${sal ? ` — ${sal}` : ""}`);
+      });
+      lines.push("");
+    }
+  }
+
+  return lines.join("\n").trim();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Route handler
+// ─────────────────────────────────────────────────────────────
+
 export default async function handler(req, res) {
   applyCors(req, res);
 
   if (req.method === "OPTIONS") return res.status(200).end();
+
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
@@ -105,13 +262,14 @@ export default async function handler(req, res) {
     }
 
     const body = getBody(req);
+    const baseUrl = getBaseUrl(req);
 
     const currentRole = body.currentRole || "Not provided";
     const targetRole = body.targetRole || "Not provided";
     const exp = body.yearsExperience ?? body.experienceYears ?? "Not provided";
     const skills = normalizeSkills(body.skills);
 
-    // ← ADDED: fetch career context for this user
+    // Career context
     let careerContext = null;
     let contextString = "";
     try {
@@ -121,12 +279,42 @@ export default async function handler(req, res) {
         contextString = buildContextString(careerContext);
       }
     } catch (ctxErr) {
-      // never block the engine if context fetch fails
       console.warn("career-roadmap: context fetch failed silently:", ctxErr.message);
     }
-    // ← END ADDED
 
-    // ← ADDED: build visa-aware rules to inject into system prompt
+    // Career Intelligence Layer lookups
+    const currentSlug = slugifyRole(currentRole);
+    const targetSlug = slugifyRole(targetRole);
+
+    const [currentRoleData, targetRoleData, pathData] = await Promise.all([
+      fetchRoleIntelligence(currentSlug, baseUrl),
+      fetchRoleIntelligence(targetSlug, baseUrl),
+      fetchRolePath(currentSlug, targetSlug, baseUrl),
+    ]);
+
+    const pathSlugs = Array.isArray(pathData?.path) ? pathData.path : [];
+    const intermediateSlugs = pathSlugs.slice(1, -1);
+
+    const pathRolesData = intermediateSlugs.length > 0
+      ? await Promise.all(
+          intermediateSlugs.map((s) => fetchRoleIntelligence(slugifyRole(s), baseUrl))
+        )
+      : [];
+
+    const allPathRolesData = [
+      currentRoleData,
+      ...pathRolesData,
+      targetRoleData,
+    ].filter(Boolean);
+
+    const roleContextSection = buildRoleContextSection({
+      currentRoleData,
+      targetRoleData,
+      pathData,
+      pathRolesData: allPathRolesData,
+    });
+
+    // Visa-aware rules
     const visaRules = careerContext ? `
 VISA-AWARE RULES (derived from user's previous visa engine session):
 ${careerContext.requires_sponsorship
@@ -145,7 +333,6 @@ ${careerContext.last_skills_summary
   ? `- Previous skills analysis summary: ${careerContext.last_skills_summary}`
   : ""}
 `.trim() : "";
-    // ← END ADDED
 
     const systemPrompt = `
 You are the "HireEdge Career Roadmap Engine".
@@ -182,6 +369,7 @@ Rules:
 - milestones_to_stay_on_track MUST be at least 10 items.
 - sponsorship_note: if user requires sponsorship, list 3-5 UK employers in the target role known to sponsor. Otherwise null.
 - visa_note: if visa constraints exist, summarise impact on timeline. Otherwise null.
+- Use structured role intelligence and path data where provided to ground your recommendations in real market data.
 
 ${visaRules}
 
@@ -193,11 +381,12 @@ Current role: ${currentRole}
 Target role: ${targetRole}
 Experience (years): ${exp}
 Current skills: ${skills.join(", ")}
-${contextString}
+${contextString ? `\n${contextString}` : ""}
+${roleContextSection ? `\n${roleContextSection}` : ""}
 `.trim();
 
     const response = await client.responses.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4o-mini",
       input: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -221,7 +410,6 @@ ${contextString}
       });
     }
 
-    // ← ADDED: write roadmap summary back to context for other engines to use
     try {
       const userId = await getUserIdFromToken(req);
       if (userId && parsed.json?.summary) {
@@ -236,18 +424,30 @@ ${contextString}
     } catch (ctxErr) {
       console.warn("career-roadmap: context save failed silently:", ctxErr.message);
     }
-    // ← END ADDED
 
-    return res.status(200).json({ ok: true, roadmap: parsed.json });
+    const responseBody = {
+      ok: true,
+      roadmap: parsed.json,
+    };
+
+    if (pathData?.path?.length) {
+      responseBody.role_path = {
+        from: currentRoleData?.title || currentRole,
+        to: targetRoleData?.title || targetRole,
+        path: pathData.path,
+        steps: pathData.steps ?? pathData.path.length - 1,
+      };
+    }
+
+    return res.status(200).json(responseBody);
 
   } catch (err) {
     const status = err?.status || err?.response?.status;
     const message = err?.message || "Unknown error";
-    console.error("career-roadmap OpenAI error:", { status, message, data: err?.response?.data });
+    console.error("career-roadmap error:", { status, message });
     return res.status(500).json({
       ok: false,
       error: "Server error while generating roadmap",
-      debug: { status, message },
     });
   }
 }
