@@ -7,15 +7,18 @@
 // ============================================================================
 
 import { assessVisaEligibility, compareVisaEligibility } from "../../lib/tools/visaEngine.js";
+import { enforceBilling } from "../../lib/billing/billingMiddleware.js";
 
 export default function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-HireEdge-Plan, X-HireEdge-User-Id");
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   try {
+    if (enforceBilling(req, res, "visa-eligibility")) return;
+
     const { action } = req.query;
 
     switch (action) {
