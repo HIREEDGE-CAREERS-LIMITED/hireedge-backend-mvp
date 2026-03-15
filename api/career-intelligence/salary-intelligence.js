@@ -1,2 +1,2 @@
-import handler from "../salary-intelligence.js";
+import { loadRolesDataset } from "../../lib/dataset/loadDataset.js";
 export default handler;
