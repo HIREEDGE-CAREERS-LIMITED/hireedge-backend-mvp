@@ -1,12 +1,36 @@
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+// ============================================================================
+// api/copilot/chat.js
+// HireEdge — Vercel Serverless API
+//
+// POST  /api/copilot/chat
+// Body: { "message": "...", "context": { role, target, skills, yearsExp, lastIntent, history } }
+//
+// Main conversational Copilot endpoint. Runs the full pipeline:
+// intent detection → context resolution → orchestration → recommendations → response.
+// ============================================================================
 
-  return res.status(200).json({
-    ok: true,
-    route: "copilot/chat",
-    status: "scaffolded",
-    message: "Copilot chat endpoint scaffold created. Orchestration wiring pending.",
-  });
+import { composeChatResponse } from "../../lib/copilot/responseComposer.js";
+
+export default function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed. Use POST." });
+
+  try {
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    const { message, context } = body;
+
+    if (!message || typeof message !== "string" || !message.trim()) {
+      return res.status(400).json({ error: "Missing required field: message" });
+    }
+
+    const result = composeChatResponse(message.trim(), context || {});
+
+    return res.status(200).json(result);
+  } catch (err) {
+    console.error("[copilot/chat]", err);
+    return res.status(500).json({ error: "Internal server error", message: err.message });
+  }
 }
