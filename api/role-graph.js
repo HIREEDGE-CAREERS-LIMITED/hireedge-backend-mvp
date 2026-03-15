@@ -1,9 +1,5 @@
 import { loadRolesDataset } from "../lib/loadDataset.js";
 
-// ─────────────────────────────────────────────────────────────
-// Constants
-// ─────────────────────────────────────────────────────────────
-
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",
   "https://hireedge-2d4baa.webflow.io",
@@ -14,10 +10,6 @@ const VERSION = "2.0.0";
 const DEFAULT_DEPTH = 2;
 const MIN_DEPTH = 1;
 const MAX_DEPTH = 5;
-
-// ─────────────────────────────────────────────────────────────
-// Small pure helpers
-// ─────────────────────────────────────────────────────────────
 
 function normalizeSlug(value) {
   if (value == null) return "";
@@ -46,10 +38,6 @@ function safeInt(value, def, min, max) {
   if (!Number.isFinite(n)) return def;
   return Math.min(Math.max(n, min), max);
 }
-
-// ─────────────────────────────────────────────────────────────
-// Route handler
-// ─────────────────────────────────────────────────────────────
 
 export default function handler(req, res) {
   const origin = req.headers.origin;

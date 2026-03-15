@@ -1,25 +1,17 @@
-// api/role-graph-meta.js
-import fs from "fs";
-import path from "path";
+import { loadRolesDataset } from "../lib/loadDataset.js";
 
 let CACHE = null;
 let CACHE_AT = 0;
-const CACHE_MS = 1000 * 60 * 10; // 10 minutes
+const CACHE_MS = 1000 * 60 * 10;
 
 function loadMeta() {
   const now = Date.now();
+
   if (CACHE && now - CACHE_AT < CACHE_MS) {
     return CACHE;
   }
 
-  const filePath = path.join(process.cwd(), "data", "roles-enriched.json");
-  const raw = fs.readFileSync(filePath, "utf8");
-  const parsed = JSON.parse(raw);
-
-  // Support either:
-  // 1) array root: [ {...}, {...} ]
-  // 2) object root: { roles: [ {...}, {...} ] }
-  const roles = Array.isArray(parsed) ? parsed : parsed.roles || [];
+  const roles = loadRolesDataset();
 
   let total_edges = 0;
   const categories = {};
@@ -57,12 +49,14 @@ function loadMeta() {
   };
 
   CACHE_AT = now;
+
   return CACHE;
 }
 
 export default function handler(req, res) {
   try {
     const data = loadMeta();
+
     return res.status(200).json(data);
   } catch (err) {
     return res.status(500).json({

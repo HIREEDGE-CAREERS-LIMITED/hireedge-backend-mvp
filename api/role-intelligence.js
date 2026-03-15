@@ -1,9 +1,5 @@
 import { loadRolesDataset } from "../lib/loadDataset.js";
 
-// ------------------------------------------------------------
-// Constants
-// ------------------------------------------------------------
-
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",
   "https://hireedge-2d4baa.webflow.io",
@@ -18,10 +14,6 @@ const META = {
   source: "HireEdge Role Intelligence Dataset (internal)",
   last_updated: null,
 };
-
-// ------------------------------------------------------------
-// Helpers
-// ------------------------------------------------------------
 
 function slugify(value) {
   return String(value || "")
@@ -47,10 +39,6 @@ function formatRolePreview(role) {
     seniority: role.seniority,
   };
 }
-
-// ------------------------------------------------------------
-// API Handler
-// ------------------------------------------------------------
 
 export default function handler(req, res) {
   const origin = req.headers.origin;
@@ -81,11 +69,6 @@ export default function handler(req, res) {
     };
 
     const { slug, role, q, limit } = req.query || {};
-
-    // --------------------------------------------------------
-    // Exact role lookup by slug
-    // Supports both ?slug= and ?role=
-    // --------------------------------------------------------
     const requestedSlug = slugify(slug || role);
 
     if (requestedSlug) {
@@ -126,9 +109,6 @@ export default function handler(req, res) {
       });
     }
 
-    // --------------------------------------------------------
-    // Search mode by q
-    // --------------------------------------------------------
     const query = String(q || "").trim().toLowerCase();
 
     if (!query) {
