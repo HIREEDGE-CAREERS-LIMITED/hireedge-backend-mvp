@@ -1,4 +1,4 @@
-import { loadRolesDataset } from "../lib/loadDataset";
+import { loadRolesDataset } from "../lib/loadDataset.js";
 
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",

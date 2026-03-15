@@ -1,4 +1,4 @@
-import { loadRolesDataset } from "../lib/loadDataset";
+import { loadRolesDataset } from "../lib/loadDataset.js";
 
 // ─────────────────────────────────────────────────────────────
 // Constants
