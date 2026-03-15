@@ -1,5 +1,4 @@
-import fs from "fs";
-import path from "path";
+import { loadRolesDataset } from "../lib/loadDataset";
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -11,59 +10,10 @@ const ALLOWED_ORIGINS = [
   "http://localhost:3000",
 ];
 
-const DATASET_PATH = path.join(process.cwd(), "data", "roles-enriched.json");
 const VERSION = "2.0.0";
 const DEFAULT_DEPTH = 2;
 const MIN_DEPTH = 1;
 const MAX_DEPTH = 5;
-
-// ─────────────────────────────────────────────────────────────
-// Dataset loader  (module-level cache)
-// ─────────────────────────────────────────────────────────────
-
-let _cache = null;
-
-/**
- * Reads and caches roles from the dataset file.
- * Supports both a bare array and { roles: [...] } wrapper.
- * Throws a plain Error on any failure.
- *
- * @returns {object[]}
- */
-function loadRolesEnriched() {
-  if (_cache) return _cache;
-
-  let raw;
-  try {
-    raw = fs.readFileSync(DATASET_PATH, "utf-8");
-  } catch {
-    throw new Error("Dataset file could not be read.");
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("Dataset file contains invalid JSON.");
-  }
-
-  const roles = Array.isArray(parsed)
-    ? parsed
-    : Array.isArray(parsed.roles)
-    ? parsed.roles
-    : Array.isArray(parsed.results)
-    ? parsed.results
-    : Array.isArray(parsed.data)
-    ? parsed.data
-    : null;
-
-  if (!roles) {
-    throw new Error("Dataset does not contain a recognisable roles array.");
-  }
-
-  _cache = roles;
-  return _cache;
-}
 
 // ─────────────────────────────────────────────────────────────
 // Small pure helpers
@@ -102,7 +52,6 @@ function safeInt(value, def, min, max) {
 // ─────────────────────────────────────────────────────────────
 
 export default function handler(req, res) {
-  // ── CORS ────────────────────────────────────────────────
   const origin = req.headers.origin;
   const allowedOrigin = ALLOWED_ORIGINS.includes(origin)
     ? origin
@@ -117,13 +66,11 @@ export default function handler(req, res) {
     return res.status(200).end();
   }
 
-  // ── Method guard ────────────────────────────────────────
   if (req.method !== "GET") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    // ── Validate slug param ───────────────────────────────
     const rawSlug = req.query.slug ?? req.query.role ?? null;
     const slug = normalizeSlug(rawSlug);
 
@@ -131,21 +78,16 @@ export default function handler(req, res) {
       return res.status(400).json({ error: "Missing slug" });
     }
 
-    // ── Parse depth ───────────────────────────────────────
     const depth = safeInt(req.query.depth, DEFAULT_DEPTH, MIN_DEPTH, MAX_DEPTH);
 
-    // ── Load dataset ──────────────────────────────────────
-    const roles = loadRolesEnriched();
-
+    const roles = loadRolesDataset();
     const bySlug = new Map(roles.map((r) => [normalizeSlug(r.slug), r]));
 
-    // ── Find root role ────────────────────────────────────
     const rootRaw = bySlug.get(slug);
     if (!rootRaw) {
       return res.status(404).json({ error: "Role not found" });
     }
 
-    // ── BFS graph expansion ───────────────────────────────
     const nodesMap = new Map();
     const links = [];
     const visited = new Set();
@@ -163,7 +105,6 @@ export default function handler(req, res) {
       if (!current) continue;
 
       const cp = current.career_paths;
-
       const nextSlugs = Array.isArray(cp?.next_roles) ? cp.next_roles : [];
 
       for (const raw of nextSlugs) {
@@ -212,7 +153,6 @@ export default function handler(req, res) {
       }
     }
 
-    // ── Build response ────────────────────────────────────
     return res.status(200).json({
       version: VERSION,
       root: safeNode(rootRaw),

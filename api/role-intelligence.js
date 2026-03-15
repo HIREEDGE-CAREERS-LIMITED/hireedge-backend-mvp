@@ -1,5 +1,4 @@
-import fs from "fs";
-import path from "path";
+import { loadRolesDataset } from "../lib/loadDataset";
 
 // ------------------------------------------------------------
 // Constants
@@ -11,7 +10,6 @@ const ALLOWED_ORIGINS = [
   "http://localhost:3000",
 ];
 
-const DATASET_PATH = path.join(process.cwd(), "data", "roles-enriched.json");
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 
@@ -20,54 +18,6 @@ const META = {
   source: "HireEdge Role Intelligence Dataset (internal)",
   last_updated: null,
 };
-
-// ------------------------------------------------------------
-// Dataset loader (cached after first read)
-// ------------------------------------------------------------
-
-let _cache = null;
-
-function loadDataset() {
-  if (_cache) return _cache;
-
-  let raw;
-  try {
-    raw = fs.readFileSync(DATASET_PATH, "utf8");
-  } catch {
-    throw new Error("Dataset file could not be read.");
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("Dataset file contains invalid JSON.");
-  }
-
-  const roles = Array.isArray(parsed)
-    ? parsed
-    : Array.isArray(parsed.roles)
-    ? parsed.roles
-    : Array.isArray(parsed.results)
-    ? parsed.results
-    : Array.isArray(parsed.data)
-    ? parsed.data
-    : null;
-
-  if (!roles) {
-    throw new Error("Dataset does not contain a recognisable roles array.");
-  }
-
-  _cache = {
-    roles,
-    meta: {
-      ...META,
-      last_updated: parsed.last_updated ?? "March 2026",
-    },
-  };
-
-  return _cache;
-}
 
 // ------------------------------------------------------------
 // Helpers
@@ -124,7 +74,12 @@ export default function handler(req, res) {
   }
 
   try {
-    const { roles, meta } = loadDataset();
+    const roles = loadRolesDataset();
+    const meta = {
+      ...META,
+      last_updated: "March 2026",
+    };
+
     const { slug, role, q, limit } = req.query || {};
 
     // --------------------------------------------------------

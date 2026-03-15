@@ -1,34 +1,10 @@
-import fs from "fs";
-import path from "path";
+import { loadRolesDataset } from "../lib/loadDataset";
 
 const ALLOWED_ORIGINS = [
   "https://hireedge-mvp-web.vercel.app",
   "https://hireedge-2d4baa.webflow.io",
   "http://localhost:3000",
 ];
-
-let CACHE = null;
-
-function loadDataset() {
-  if (CACHE) return CACHE;
-
-  const filePath = path.join(process.cwd(), "data", "roles-enriched.json");
-  const raw = fs.readFileSync(filePath, "utf8");
-  const json = JSON.parse(raw);
-
-  const rolesArray = Array.isArray(json)
-    ? json
-    : (json.roles || json.results || json.data || []);
-
-  const bySlug = new Map(
-    rolesArray
-      .filter((r) => r && r.slug)
-      .map((r) => [r.slug, r])
-  );
-
-  CACHE = { rolesArray, bySlug };
-  return CACHE;
-}
 
 function bfsPath(bySlug, start, goal, maxDepth = 10) {
   if (start === goal) return [start];
@@ -99,7 +75,12 @@ export default function handler(req, res) {
     const normalizedFrom = String(from).trim().toLowerCase().replace(/\s+/g, "-");
     const normalizedTo = String(to).trim().toLowerCase().replace(/\s+/g, "-");
 
-    const { bySlug } = loadDataset();
+    const rolesArray = loadRolesDataset();
+    const bySlug = new Map(
+      rolesArray
+        .filter((r) => r && r.slug)
+        .map((r) => [r.slug, r])
+    );
 
     if (!bySlug.has(normalizedFrom)) {
       return res.status(404).json({
