@@ -16,10 +16,13 @@
  * ============================================================================
  */
 
-const fs = require("fs");
-const path = require("path");
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 // ── Path to your dataset ───────────────────────────────────────────────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const DATA_PATH = path.join(__dirname, "data", "roles-enriched.json");
 
 // ── Career transition definitions ──────────────────────────────────────────
@@ -27,15 +30,10 @@ const DATA_PATH = path.join(__dirname, "data", "roles-enriched.json");
 // These represent realistic UK career transitions.
 
 const TRANSITIONS = [
-  // ═══════════════════════════════════════════════════════════════════════════
-  // DATA & ANALYTICS cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // Junior → Mid
+  // DATA & ANALYTICS
   ["junior-data-analyst", "data-analyst", 3, 1.5, 25],
   ["junior-business-analyst", "business-analyst", 3, 1.5, 25],
 
-  // Data Analyst paths
   ["data-analyst", "senior-data-analyst", 4, 2, 20],
   ["data-analyst", "business-analyst", 3, 1, 10],
   ["data-analyst", "product-analyst", 4, 1.5, 15],
@@ -44,35 +42,28 @@ const TRANSITIONS = [
   ["data-analyst", "analytics-engineer", 5, 1.5, 25],
   ["data-analyst", "bi-developer", 4, 1, 15],
 
-  // Senior Data Analyst paths
   ["senior-data-analyst", "lead-data-analyst", 4, 2, 15],
   ["senior-data-analyst", "analytics-manager", 5, 2, 20],
   ["senior-data-analyst", "data-scientist", 5, 1.5, 20],
   ["senior-data-analyst", "product-analyst", 3, 1, 10],
   ["senior-data-analyst", "data-engineer", 5, 1.5, 25],
 
-  // Lead / Manager
   ["lead-data-analyst", "analytics-manager", 4, 1.5, 15],
   ["lead-data-analyst", "head-of-data", 6, 2.5, 30],
   ["analytics-manager", "head-of-data", 5, 2, 25],
   ["analytics-manager", "director-of-analytics", 6, 3, 30],
 
-  // BI Developer
   ["bi-developer", "senior-bi-developer", 4, 2, 20],
   ["bi-developer", "analytics-engineer", 4, 1.5, 20],
   ["senior-bi-developer", "analytics-manager", 5, 2, 20],
   ["senior-bi-developer", "data-engineer", 5, 1.5, 20],
 
-  // Analytics Engineer
   ["analytics-engineer", "senior-analytics-engineer", 4, 2, 20],
   ["analytics-engineer", "data-engineer", 4, 1, 15],
   ["senior-analytics-engineer", "lead-data-engineer", 5, 2, 20],
   ["senior-analytics-engineer", "analytics-manager", 5, 2, 15],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // BUSINESS ANALYSIS cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // BUSINESS ANALYSIS
   ["business-analyst", "senior-business-analyst", 4, 2, 20],
   ["business-analyst", "product-analyst", 4, 1.5, 15],
   ["business-analyst", "product-manager", 6, 2.5, 30],
@@ -92,10 +83,7 @@ const TRANSITIONS = [
   ["business-intelligence-analyst", "bi-developer", 4, 1.5, 15],
   ["business-intelligence-analyst", "senior-data-analyst", 4, 1.5, 15],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PRODUCT cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // PRODUCT
   ["product-analyst", "senior-product-analyst", 4, 2, 20],
   ["product-analyst", "product-manager", 5, 2, 25],
   ["product-analyst", "data-scientist", 6, 2, 20],
@@ -127,10 +115,7 @@ const TRANSITIONS = [
   ["product-owner", "product-manager", 4, 1.5, 15],
   ["senior-product-owner", "product-manager", 3, 1, 10],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // DATA SCIENCE cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // DATA SCIENCE
   ["data-scientist", "senior-data-scientist", 4, 2, 20],
   ["data-scientist", "machine-learning-engineer", 5, 2, 25],
   ["data-scientist", "data-engineer", 5, 1.5, 15],
@@ -149,10 +134,7 @@ const TRANSITIONS = [
   ["director-of-data-science", "vp-of-data", 5, 3, 25],
   ["head-of-data", "vp-of-data", 5, 3, 25],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // DATA ENGINEERING cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // DATA ENGINEERING
   ["data-engineer", "senior-data-engineer", 4, 2, 20],
   ["data-engineer", "analytics-engineer", 3, 1, 10],
   ["data-engineer", "machine-learning-engineer", 5, 2, 20],
@@ -174,10 +156,7 @@ const TRANSITIONS = [
   ["staff-data-engineer", "principal-data-architect", 5, 2.5, 20],
   ["head-of-data-engineering", "director-of-engineering", 5, 3, 25],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // MACHINE LEARNING / AI cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // ML / AI
   ["machine-learning-engineer", "senior-machine-learning-engineer", 4, 2, 20],
   ["machine-learning-engineer", "mlops-engineer", 4, 1.5, 15],
   ["machine-learning-engineer", "ai-engineer", 4, 1.5, 15],
@@ -192,10 +171,7 @@ const TRANSITIONS = [
   ["mlops-engineer", "senior-mlops-engineer", 4, 2, 20],
   ["senior-mlops-engineer", "head-of-mlops", 5, 2.5, 25],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SOFTWARE ENGINEERING cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // SOFTWARE ENGINEERING
   ["junior-software-engineer", "software-engineer", 3, 1.5, 25],
   ["software-engineer", "senior-software-engineer", 4, 2, 20],
   ["software-engineer", "frontend-engineer", 3, 1, 10],
@@ -238,10 +214,7 @@ const TRANSITIONS = [
   ["cloud-architect", "solutions-architect", 4, 1.5, 15],
   ["solutions-architect", "enterprise-architect", 5, 2.5, 25],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // UX / DESIGN cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // UX / DESIGN
   ["ux-designer", "senior-ux-designer", 4, 2, 20],
   ["ux-designer", "product-designer", 4, 1.5, 15],
   ["ux-designer", "ux-researcher", 4, 1.5, 10],
@@ -262,10 +235,7 @@ const TRANSITIONS = [
   ["design-manager", "head-of-design", 4, 2, 20],
   ["head-of-design", "vp-of-design", 5, 3, 25],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // PROJECT / PROGRAMME MANAGEMENT cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // PROJECT / PROGRAMME
   ["project-manager", "senior-project-manager", 4, 2, 20],
   ["project-manager", "programme-manager", 5, 2.5, 25],
   ["project-manager", "product-manager", 5, 2, 20],
@@ -283,10 +253,7 @@ const TRANSITIONS = [
   ["senior-scrum-master", "agile-coach", 4, 2, 20],
   ["agile-coach", "head-of-agile", 5, 2.5, 20],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // CONSULTING / MANAGEMENT cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // CONSULTING
   ["management-consultant", "senior-management-consultant", 4, 2, 25],
   ["management-consultant", "business-analyst", 3, 1, -5],
   ["management-consultant", "product-manager", 5, 2, 15],
@@ -299,10 +266,7 @@ const TRANSITIONS = [
   ["strategy-consultant", "senior-strategy-consultant", 4, 2, 25],
   ["senior-strategy-consultant", "product-director", 6, 3, 20],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // MARKETING / GROWTH cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // MARKETING / GROWTH
   ["marketing-analyst", "senior-marketing-analyst", 4, 2, 20],
   ["marketing-analyst", "data-analyst", 3, 1, 5],
   ["marketing-analyst", "growth-analyst", 3, 1, 10],
@@ -314,10 +278,7 @@ const TRANSITIONS = [
   ["digital-marketing-manager", "senior-digital-marketing-manager", 4, 2, 20],
   ["digital-marketing-manager", "head-of-marketing", 5, 2.5, 25],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // CYBERSECURITY cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // CYBERSECURITY
   ["security-analyst", "senior-security-analyst", 4, 2, 20],
   ["security-analyst", "security-engineer", 5, 2, 20],
   ["security-engineer", "senior-security-engineer", 4, 2, 20],
@@ -325,10 +286,7 @@ const TRANSITIONS = [
   ["security-architect", "head-of-security", 5, 2.5, 25],
   ["head-of-security", "ciso", 6, 3, 35],
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // QA / TESTING cluster
-  // ═══════════════════════════════════════════════════════════════════════════
-
+  // QA / TESTING
   ["qa-engineer", "senior-qa-engineer", 4, 2, 20],
   ["qa-engineer", "qa-automation-engineer", 4, 1.5, 15],
   ["senior-qa-engineer", "qa-lead", 4, 2, 15],
@@ -350,7 +308,6 @@ function difficultyLabel(score) {
 // ── Main ───────────────────────────────────────────────────────────────────
 
 function main() {
-  // Read existing data
   let roles;
   try {
     const raw = fs.readFileSync(DATA_PATH, "utf-8");
@@ -365,7 +322,6 @@ function main() {
   const roleList = isArray ? roles : Object.values(roles);
   const roleMap = new Map();
 
-  // Build slug → role lookup
   for (const role of roleList) {
     const slug = role.slug || role.id;
     if (slug) roleMap.set(slug, role);
@@ -373,21 +329,14 @@ function main() {
 
   console.log(`Loaded ${roleMap.size} roles from ${DATA_PATH}`);
 
-  // Build adjacency list from transitions
-  const adjacency = new Map(); // slug → [{ slug, difficulty, years, growth }]
+  const adjacency = new Map();
   let applied = 0;
-  let skipped = 0;
   const missingRoles = new Set();
 
   for (const [from, to, difficulty, years, growth] of TRANSITIONS) {
-    if (!roleMap.has(from)) {
-      missingRoles.add(from);
-    }
-    if (!roleMap.has(to)) {
-      missingRoles.add(to);
-    }
+    if (!roleMap.has(from)) missingRoles.add(from);
+    if (!roleMap.has(to)) missingRoles.add(to);
 
-    // Add transition regardless — if the role doesn't exist yet, we'll create a stub
     if (!adjacency.has(from)) adjacency.set(from, []);
     adjacency.get(from).push({
       slug: to,
@@ -401,13 +350,13 @@ function main() {
 
   console.log(`Defined ${applied} transitions`);
 
-  // Create stub roles for any referenced but missing slugs
   let created = 0;
   for (const slug of missingRoles) {
     if (!roleMap.has(slug)) {
       const title = slug
         .replace(/-/g, " ")
         .replace(/\b\w/g, (c) => c.toUpperCase());
+
       const stub = {
         slug,
         title,
@@ -420,7 +369,9 @@ function main() {
         career_paths: { next_roles: [], previous_roles: [] },
         ai_context: { summary: `${title} role.` },
       };
+
       roleMap.set(slug, stub);
+
       if (isArray) {
         roles.push(stub);
       } else {
@@ -434,24 +385,22 @@ function main() {
     console.log(`Created ${created} stub roles for missing references`);
   }
 
-  // Apply transitions to role objects
   for (const [slug, role] of roleMap) {
-    // Ensure career_paths structure exists
     if (!role.career_paths) role.career_paths = {};
     if (!role.career_paths.next_roles) role.career_paths.next_roles = [];
     if (!role.career_paths.previous_roles) role.career_paths.previous_roles = [];
 
-    // Get transitions for this role
     const transitions = adjacency.get(slug) || [];
-
-    // Merge: keep existing next_roles that aren't in our list, add ours
     const existingSlugs = new Set(role.career_paths.next_roles.map((r) => r.slug));
+
     for (const t of transitions) {
       if (!existingSlugs.has(t.slug)) {
         const targetRole = roleMap.get(t.slug);
         role.career_paths.next_roles.push({
           slug: t.slug,
-          title: targetRole?.title || t.slug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+          title:
+            targetRole?.title ||
+            t.slug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
           difficulty: t.difficulty,
           difficulty_label: t.difficulty_label,
           estimated_years: t.estimated_years,
@@ -461,20 +410,27 @@ function main() {
     }
   }
 
-  // Build reverse edges (previous_roles)
   for (const [fromSlug, transitions] of adjacency) {
     for (const t of transitions) {
       const targetRole = roleMap.get(t.slug);
       if (!targetRole) continue;
-      if (!targetRole.career_paths) targetRole.career_paths = {};
-      if (!targetRole.career_paths.previous_roles) targetRole.career_paths.previous_roles = [];
 
-      const alreadyHas = targetRole.career_paths.previous_roles.some((p) => p.slug === fromSlug);
+      if (!targetRole.career_paths) targetRole.career_paths = {};
+      if (!targetRole.career_paths.previous_roles) {
+        targetRole.career_paths.previous_roles = [];
+      }
+
+      const alreadyHas = targetRole.career_paths.previous_roles.some(
+        (p) => p.slug === fromSlug
+      );
+
       if (!alreadyHas) {
         const fromRole = roleMap.get(fromSlug);
         targetRole.career_paths.previous_roles.push({
           slug: fromSlug,
-          title: fromRole?.title || fromSlug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+          title:
+            fromRole?.title ||
+            fromSlug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
           difficulty: t.difficulty,
           difficulty_label: t.difficulty_label,
           estimated_years: t.estimated_years,
@@ -484,10 +440,10 @@ function main() {
     }
   }
 
-  // Verify graph connectivity
   const allSlugs = new Set(roleMap.keys());
   const hasOutgoing = new Set(adjacency.keys());
   const hasIncoming = new Set();
+
   for (const transitions of adjacency.values()) {
     for (const t of transitions) hasIncoming.add(t.slug);
   }
@@ -504,7 +460,6 @@ function main() {
   console.log(`  Sources (no incoming): ${sources.length}`);
   console.log(`  Isolated (no connections): ${isolated.length}`);
 
-  // BFS test: can we reach product-manager from data-analyst?
   const testPaths = [
     ["data-analyst", "product-manager"],
     ["data-analyst", "data-architect"],
@@ -522,9 +477,9 @@ function main() {
     }
   }
 
-  // Write updated data
   const output = JSON.stringify(isArray ? roles : roles, null, 2);
   fs.writeFileSync(DATA_PATH, output, "utf-8");
+
   console.log(`\nWritten updated data to ${DATA_PATH}`);
   console.log("Done.");
 }
@@ -533,6 +488,7 @@ function main() {
 
 function bfs(adjacency, from, to) {
   if (from === to) return [from];
+
   const visited = new Set([from]);
   const queue = [[from]];
 
@@ -556,17 +512,44 @@ function bfs(adjacency, from, to) {
 // ── Helpers for stub role creation ─────────────────────────────────────────
 
 function inferCategory(slug) {
-  if (slug.includes("data") || slug.includes("analytics") || slug.includes("bi-")) return "Data & Analytics";
+  if (slug.includes("data") || slug.includes("analytics") || slug.includes("bi-")) {
+    return "Data & Analytics";
+  }
   if (slug.includes("product")) return "Product";
-  if (slug.includes("engineer") || slug.includes("developer") || slug.includes("architect") || slug.includes("devops") || slug.includes("sre") || slug.includes("cloud")) return "Engineering";
-  if (slug.includes("machine-learning") || slug.includes("ml") || slug.includes("ai")) return "Machine Learning & AI";
+  if (
+    slug.includes("engineer") ||
+    slug.includes("developer") ||
+    slug.includes("architect") ||
+    slug.includes("devops") ||
+    slug.includes("sre") ||
+    slug.includes("cloud")
+  ) {
+    return "Engineering";
+  }
+  if (slug.includes("machine-learning") || slug.includes("ml") || slug.includes("ai")) {
+    return "Machine Learning & AI";
+  }
   if (slug.includes("design") || slug.includes("ux")) return "Design";
   if (slug.includes("security") || slug.includes("ciso")) return "Cybersecurity";
-  if (slug.includes("project") || slug.includes("programme") || slug.includes("delivery") || slug.includes("scrum") || slug.includes("agile")) return "Project Management";
-  if (slug.includes("business") || slug.includes("consult") || slug.includes("strategy")) return "Business & Consulting";
+  if (
+    slug.includes("project") ||
+    slug.includes("programme") ||
+    slug.includes("delivery") ||
+    slug.includes("scrum") ||
+    slug.includes("agile")
+  ) {
+    return "Project Management";
+  }
+  if (slug.includes("business") || slug.includes("consult") || slug.includes("strategy")) {
+    return "Business & Consulting";
+  }
   if (slug.includes("marketing") || slug.includes("growth")) return "Marketing";
-  if (slug.includes("qa") || slug.includes("test") || slug.includes("sdet")) return "Quality Assurance";
-  if (slug.includes("cto") || slug.includes("cpo") || slug.includes("cdo") || slug.includes("vp-")) return "Leadership";
+  if (slug.includes("qa") || slug.includes("test") || slug.includes("sdet")) {
+    return "Quality Assurance";
+  }
+  if (slug.includes("cto") || slug.includes("cpo") || slug.includes("cdo") || slug.includes("vp-")) {
+    return "Leadership";
+  }
   return "General";
 }
 
@@ -584,9 +567,19 @@ function inferSeniority(slug) {
 }
 
 function inferSeniorityLevel(slug) {
-  const map = { Junior: 1, Mid: 2, Senior: 3, Lead: 4, Staff: 4, Principal: 5, Head: 5, Director: 6, VP: 7, "C-Level": 8 };
+  const map = {
+    Junior: 1,
+    Mid: 2,
+    Senior: 3,
+    Lead: 4,
+    Staff: 4,
+    Principal: 5,
+    Head: 5,
+    Director: 6,
+    VP: 7,
+    "C-Level": 8,
+  };
   return map[inferSeniority(slug)] || 2;
 }
 
-// Run
 main();
