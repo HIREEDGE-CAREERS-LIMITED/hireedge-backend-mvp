@@ -1,17 +1,37 @@
-// pages/api/career-intelligence/blind-spot.js
+import fs from "fs";
+import path from "path";
+
+const DATA_PATH = path.join(process.cwd(), "data", "roles-enriched.json");
 
 let _rolesMap = null;
 let _skillFreq = null;
 
+function loadRoles() {
+  const raw = fs.readFileSync(DATA_PATH, "utf-8");
+  const parsed = JSON.parse(raw);
+
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+
+  if (parsed && Array.isArray(parsed.roles)) {
+    return parsed.roles;
+  }
+
+  throw new Error("Unsupported dataset structure in roles-enriched.json");
+}
+
 function ensureIndex() {
   if (_rolesMap) return;
-  const raw = require('../../../data/roles-enriched.json');
-  const roles = raw.roles;
+
+  const roles = loadRoles();
   _rolesMap = {};
   _skillFreq = {};
 
   for (const role of roles) {
+    if (!role?.slug) continue;
     _rolesMap[role.slug] = role;
+
     for (const skill of role.skills || []) {
       _skillFreq[skill] = (_skillFreq[skill] || 0) + 1;
     }
@@ -28,6 +48,7 @@ function weightedJaccard(skillsA, skillsB) {
   const setA = new Set(skillsA || []);
   const setB = new Set(skillsB || []);
   const union = new Set([...setA, ...setB]);
+
   if (union.size === 0) return 0;
 
   let inter = 0;
@@ -42,6 +63,26 @@ function weightedJaccard(skillsA, skillsB) {
   return total === 0 ? 0 : inter / total;
 }
 
+function getNextEdges(role) {
+  if (Array.isArray(role?.transitions?.next)) {
+    return role.transitions.next;
+  }
+
+  if (Array.isArray(role?.career_paths?.next_roles)) {
+    return role.career_paths.next_roles.map((edge) =>
+      typeof edge === "string" ? { to: edge } : edge
+    );
+  }
+
+  return [];
+}
+
+function getTargetSlug(edge) {
+  if (!edge) return null;
+  if (typeof edge === "string") return edge;
+  return edge.role_slug || edge.slug || edge.to || null;
+}
+
 function bfsReachable(startSlug, maxHops) {
   const visited = new Set([startSlug]);
   const queue = [{ slug: startSlug, distance: 0 }];
@@ -54,10 +95,10 @@ function bfsReachable(startSlug, maxHops) {
     const node = _rolesMap[slug];
     if (!node) continue;
 
-    const nextEdges = node.transitions?.next || [];
+    const nextEdges = getNextEdges(node);
 
     for (const edge of nextEdges) {
-      const targetSlug = edge.role_slug || edge.slug || edge.to || null;
+      const targetSlug = getTargetSlug(edge);
       if (!targetSlug || visited.has(targetSlug) || !_rolesMap[targetSlug]) continue;
 
       visited.add(targetSlug);
@@ -72,12 +113,12 @@ function bfsReachable(startSlug, maxHops) {
 function edgeDifficultyScore(edge) {
   if (!edge) return 0.5;
 
-  if (typeof edge.difficulty_score === 'number') {
+  if (typeof edge.difficulty_score === "number") {
     const ds = edge.difficulty_score;
     return ds > 1 ? Math.max(0, 1 - ds / 100) : Math.max(0, 1 - ds);
   }
 
-  const label = (edge.difficulty_label || '').toLowerCase();
+  const label = (edge.difficulty_label || "").toLowerCase();
   const labelMap = {
     low: 1.0,
     easy: 1.0,
@@ -93,7 +134,7 @@ function edgeDifficultyScore(edge) {
 
   if (labelMap[label] !== undefined) return labelMap[label];
 
-  if (typeof edge.estimated_years === 'number') {
+  if (typeof edge.estimated_years === "number") {
     if (edge.estimated_years <= 1) return 1.0;
     if (edge.estimated_years <= 2) return 0.6;
     if (edge.estimated_years <= 4) return 0.3;
@@ -104,20 +145,21 @@ function edgeDifficultyScore(edge) {
 }
 
 function edgeDifficultyLabel(edge) {
-  if (!edge) return 'medium';
-  if (edge.difficulty_label) return edge.difficulty_label.toLowerCase();
+  if (!edge) return "medium";
+  if (edge.difficulty_label) return String(edge.difficulty_label).toLowerCase();
 
   const score = edgeDifficultyScore(edge);
-  if (score >= 0.8) return 'low';
-  if (score >= 0.5) return 'medium';
-  if (score >= 0.2) return 'hard';
-  return 'stretch';
+  if (score >= 0.8) return "low";
+  if (score >= 0.5) return "medium";
+  if (score >= 0.2) return "hard";
+  return "stretch";
 }
 
 function edgeConfidence(edge) {
   if (!edge) return 0.3;
 
   let score = 0.3;
+
   if (edge.difficulty_label) score += 0.2;
   if (edge.difficulty_score) score += 0.1;
   if (edge.estimated_years) score += 0.2;
@@ -128,13 +170,16 @@ function edgeConfidence(edge) {
 }
 
 function computeEdgexScore({ overlap, salaryNorm, hops, diffScore, confidence }) {
-  return Math.round((
-    0.35 * overlap +
-    0.25 * salaryNorm +
-    0.20 * (1 / Math.max(hops, 1)) +
-    0.12 * diffScore +
-    0.08 * confidence
-  ) * 1000) / 10;
+  return Math.round(
+    (
+      0.35 * overlap +
+      0.25 * salaryNorm +
+      0.2 * (1 / Math.max(hops, 1)) +
+      0.12 * diffScore +
+      0.08 * confidence
+    ) *
+      1000
+  ) / 10;
 }
 
 function buildMissingSkills(targetRole, currentSet) {
@@ -146,12 +191,12 @@ function buildMissingSkills(targetRole, currentSet) {
       const density = (_skillFreq[s] || 1) / total;
       const criticality =
         targetRole.skill_criticality?.[s] ||
-        (density > 0.30 ? 'critical' : density > 0.10 ? 'important' : 'nice-to-have');
+        (density > 0.3 ? "critical" : density > 0.1 ? "important" : "nice-to-have");
 
       return { skill: s, criticality };
     })
     .sort((a, b) => {
-      const order = { critical: 0, important: 1, 'nice-to-have': 2 };
+      const order = { critical: 0, important: 1, "nice-to-have": 2 };
       return (order[a.criticality] ?? 3) - (order[b.criticality] ?? 3);
     });
 }
@@ -161,16 +206,18 @@ function buildWhy(target, source, delta, hops, edge) {
 
   const targetSkillSet = new Set(target.skills || []);
   const shared = (source.skills || []).filter((s) => targetSkillSet.has(s));
-  const topShared = shared.slice(0, 3).join(', ') || 'overlapping skills';
-  const hopStr = hops === 1 ? 'one transition' : `${hops} transitions`;
+  const topShared = shared.slice(0, 3).join(", ") || "overlapping skills";
+  const hopStr = hops === 1 ? "one transition" : `${hops} transitions`;
   const salStr =
     delta > 0
-      ? `a salary uplift of £${Math.round(delta).toLocaleString('en-GB')}`
-      : 'a comparable salary level';
+      ? `a salary uplift of £${Math.round(delta).toLocaleString("en-GB")}`
+      : "a comparable salary level";
 
-  let edgeStr = '';
+  let edgeStr = "";
   if (edge?.estimated_years) {
-    edgeStr = ` Typical transition time is ${edge.estimated_years} year${edge.estimated_years === 1 ? '' : 's'}.`;
+    edgeStr = ` Typical transition time is ${edge.estimated_years} year${
+      edge.estimated_years === 1 ? "" : "s"
+    }.`;
   }
   if (edge?.salary_growth_pct) {
     edgeStr += ` Salary growth on this path averages ${edge.salary_growth_pct}%.`;
@@ -188,20 +235,26 @@ function buildNextStep(missing, target, edge) {
   if (target.recommended_next_step) return target.recommended_next_step;
 
   const critical = missing
-    .filter((m) => m.criticality === 'critical')
+    .filter((m) => m.criticality === "critical")
     .slice(0, 2)
     .map((m) => m.skill);
 
   if (edge?.estimated_years) {
     const yr = edge.estimated_years;
     const gap = critical.length
-      ? ` Focus on ${critical.join(' and ')} to accelerate this.`
-      : '';
-    return `EDGEX estimates this transition takes around ${yr} year${yr === 1 ? '' : 's'}.${gap}`;
+      ? ` Focus on ${critical.join(" and ")} to accelerate this.`
+      : "";
+    return `EDGEX estimates this transition takes around ${yr} year${
+      yr === 1 ? "" : "s"
+    }.${gap}`;
   }
 
   return critical.length
-    ? `Focus on closing your critical gaps: ${critical.join(' and ')}. A hands-on project in these areas is your fastest route to being competitive for ${target.title} roles.`
+    ? `Focus on closing your critical gaps: ${critical.join(
+        " and "
+      )}. A hands-on project in these areas is your fastest route to being competitive for ${
+        target.title
+      } roles.`
     : `Your skill overlap is already strong. Use the Career Path tool to map the exact route to ${target.title}.`;
 }
 
@@ -230,18 +283,25 @@ function buildResult(rank, target, source, distance, overlap, maxDelta, edge) {
     rank,
     role_slug: target.slug,
     role_title: target.title,
-    category: target.category || 'Unknown',
+    category: target.category || "Unknown",
     graph_distance: distance,
     skill_overlap_score: Math.round(overlap * 1000) / 1000,
     salary_delta: {
       current_mean: currentMean,
       target_mean: targetMean,
       delta: Math.round(delta),
-      delta_percent: currentMean > 0 ? Math.round((delta / currentMean) * 1000) / 10 : 0,
+      delta_percent:
+        currentMean > 0 ? Math.round((delta / currentMean) * 1000) / 10 : 0,
     },
     transition_difficulty: diffLabel,
     confidence_score: Math.round(confidence * 1000) / 1000,
-    edgex_score: computeEdgexScore({ overlap, salaryNorm, hops: distance, diffScore, confidence }),
+    edgex_score: computeEdgexScore({
+      overlap,
+      salaryNorm,
+      hops: distance,
+      diffScore,
+      confidence,
+    }),
     why_this_role: buildWhy(target, source, delta, distance, edge),
     shared_skills: sharedSkills,
     missing_skills: missing,
@@ -250,7 +310,7 @@ function buildResult(rank, target, source, distance, overlap, maxDelta, edge) {
       ? {
           year_1: Math.round(targetMean * 0.93),
           year_2: targetMean,
-          year_3: Math.round(targetMean * 1.10),
+          year_3: Math.round(targetMean * 1.1),
         }
       : null,
     transition_evidence: evidence,
@@ -258,7 +318,7 @@ function buildResult(rank, target, source, distance, overlap, maxDelta, edge) {
 }
 
 function findBlindSpots(source, { minOverlap, minSalaryDelta, maxHops, limit }) {
-  const currentCategory = source.category || '';
+  const currentCategory = source.category || "";
   const currentMean = getSalary(source);
   const reachable = bfsReachable(source.slug, maxHops);
   const candidates = [];
@@ -266,7 +326,7 @@ function findBlindSpots(source, { minOverlap, minSalaryDelta, maxHops, limit }) 
   for (const { slug, distance, edge } of reachable) {
     const target = _rolesMap[slug];
     if (!target) continue;
-    if ((target.category || '') === currentCategory) continue;
+    if ((target.category || "") === currentCategory) continue;
 
     const overlap = weightedJaccard(source.skills || [], target.skills || []);
     if (overlap < minOverlap) continue;
@@ -292,7 +352,9 @@ function findBlindSpots(source, { minOverlap, minSalaryDelta, maxHops, limit }) 
     }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
-    .map((c, i) => buildResult(i + 1, c.target, source, c.distance, c.overlap, maxDelta, c.edge));
+    .map((c, i) =>
+      buildResult(i + 1, c.target, source, c.distance, c.overlap, maxDelta, c.edge)
+    );
 }
 
 function findWithFallback(source, params) {
@@ -304,16 +366,20 @@ function findWithFallback(source, params) {
     return {
       results,
       fallback: true,
-      fallback_reason: 'Overlap threshold relaxed to 0.45 — limited strong matches for this role.',
+      fallback_reason: "Overlap threshold relaxed to 0.45 — limited strong matches for this role.",
     };
   }
 
-  results = findBlindSpots(source, { ...params, minOverlap: 0.45, maxHops: Math.max(params.maxHops, 4) });
+  results = findBlindSpots(source, {
+    ...params,
+    minOverlap: 0.45,
+    maxHops: Math.max(params.maxHops, 4),
+  });
   if (results.length) {
     return {
       results,
       fallback: true,
-      fallback_reason: 'Graph traversal extended to 4 hops — sparse transition data for this role.',
+      fallback_reason: "Graph traversal extended to 4 hops — sparse transition data for this role.",
     };
   }
 
@@ -330,23 +396,23 @@ function findWithFallback(source, params) {
   return {
     results: adjacent,
     fallback: true,
-    fallback_reason: 'Insufficient cross-category transition data. Showing closest high-overlap roles.',
+    fallback_reason: "Insufficient cross-category transition data. Showing closest high-overlap roles.",
   };
 }
 
 export default function handler(req, res) {
-  if (req.method !== 'GET') {
+  if (req.method !== "GET") {
     return res.status(405).json({
-      error: 'METHOD_NOT_ALLOWED',
-      message: 'Only GET requests are supported.',
+      error: "METHOD_NOT_ALLOWED",
+      message: "Only GET requests are supported.",
     });
   }
 
-  const role = (req.query.role || '').trim().toLowerCase();
+  const role = (req.query.role || "").trim().toLowerCase();
   if (!role) {
     return res.status(400).json({
-      error: 'MISSING_ROLE_PARAM',
-      message: 'Missing required parameter: role',
+      error: "MISSING_ROLE_PARAM",
+      message: "Missing required parameter: role",
       status: 400,
     });
   }
@@ -354,18 +420,19 @@ export default function handler(req, res) {
   try {
     ensureIndex();
   } catch (err) {
-    console.error('[EDGEX blind-spot] Failed to load knowledge graph:', err);
+    console.error("[EDGEX blind-spot] Failed to load knowledge graph:", err);
     return res.status(500).json({
-      error: 'GRAPH_UNAVAILABLE',
-      message: 'The career knowledge graph is temporarily unavailable.',
+      error: "GRAPH_UNAVAILABLE",
+      message: "The career knowledge graph is temporarily unavailable.",
       status: 500,
+      details: err.message,
     });
   }
 
   const source = _rolesMap[role];
   if (!source) {
     return res.status(404).json({
-      error: 'ROLE_NOT_FOUND',
+      error: "ROLE_NOT_FOUND",
       message: `Role slug "${role}" does not exist in the knowledge graph.`,
       status: 404,
     });
@@ -380,16 +447,16 @@ export default function handler(req, res) {
 
   const { results, fallback, fallback_reason } = findWithFallback(source, params);
 
-  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=600');
+  res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=600");
 
   return res.status(200).json({
-    feature: 'career_blind_spot',
-    version: '1.1',
-    generated_by: 'EDGEX',
+    feature: "career_blind_spot",
+    version: "1.2",
+    generated_by: "EDGEX",
     current_role: {
       slug: source.slug,
       title: source.title,
-      category: source.category || 'Unknown',
+      category: source.category || "Unknown",
       salary_mean: getSalary(source),
     },
     blind_spot_roles: results,
