@@ -1,13 +1,13 @@
 // ============================================================================
 // api/tools/linkedin-optimiser.js
-// HireEdge Backend — LinkedIn Optimiser (Production v3)
+// HireEdge Backend — LinkedIn Profile Audit (Production v4)
 //
-// Upgrades over v2:
-//   - headlines: { recommended, alternatives[] } — no raw style labels
-//   - about_section: { text, char_count, hashtags } — real \n newlines
-//   - experience_rewrites: per-role bullet arrays — never hallucinated metrics
-//   - skills: { core, supporting, missing } — grouped for the target role
-//   - positioning_strategy stays (angle, bridge_message, credibility_signal)
+// v4 additions over v3:
+//   profile_audit      — overall_score, breakdown (5 axes), biggest_issues (3)
+//   headlines          — when_to_use field on recommended + alternatives
+//   about_section      — structured_breakdown { hook, value_prop, transition, cta }
+//   keywords           — high_demand + missing_critical with why_it_matters/impact
+//   before_after       — headline / about_opening / experience_bullet comparison
 // ============================================================================
 
 import OpenAI from "openai";
@@ -51,7 +51,7 @@ export default async function handler(req, res) {
     ? skills.filter(Boolean)
     : skills.split(",").map((s) => s.trim()).filter(Boolean);
 
-  // ── 1. Algorithmic engine (keyword strategy, skills gap, profile score) ────
+  // ── 1. Engine layer ───────────────────────────────────────────────────────
   const engineData = generateLinkedInOptimisation({
     currentRole,
     skills:     skillList,
@@ -69,158 +69,229 @@ export default async function handler(req, res) {
   const currTitle   = currentData?.title || _slugToTitle(currentRole);
   const tgtTitle    = targetData?.title  || (targetRole ? _slugToTitle(targetRole) : null);
 
-  // ── 2. AI content layer ───────────────────────────────────────────────────
+  // ── 2. AI layer ───────────────────────────────────────────────────────────
   let ai = _emptyAI();
   if (process.env.OPENAI_API_KEY) {
     try {
-      ai = await _aiLayer({
-        currTitle, tgtTitle, skillList, yearsExp,
-        resumeText, jobDescription, industry,
-        currentData, targetData, engineData,
-      });
+      ai = await _aiLayer({ currTitle, tgtTitle, skillList, yearsExp, resumeText, jobDescription, industry, currentData, targetData, engineData });
     } catch (err) {
       console.error("[linkedin-optimiser] AI error:", err.message);
     }
   }
 
   return res.status(200).json({
-    ok: true,
+    ok:   true,
     data: {
-      // Engine fields (scores, keyword strategy)
       current_role:     engineData.current_role,
       target_role:      engineData.target_role,
       strength_score:   engineData.strength_score,
       keyword_strategy: engineData.keyword_strategy,
       skills_strategy:  engineData.skills_strategy,
-      // AI-generated content
       ai,
     },
   });
 }
 
-// ===========================================================================
-// AI layer — full content generation
-// ===========================================================================
+// =============================================================================
+// AI layer
+// =============================================================================
 
 async function _aiLayer({ currTitle, tgtTitle, skillList, yearsExp, resumeText, jobDescription, industry, currentData, targetData, engineData }) {
-  const coreSkills    = currentData?.skills_grouped?.core        || [];
-  const techSkills    = currentData?.skills_grouped?.technical   || [];
-  const tgtCore       = targetData?.skills_grouped?.core         || [];
-  const tgtTech       = targetData?.skills_grouped?.technical    || [];
-  const missingSkills = engineData?.keyword_strategy?.aspirational || [];
+  const coreSkills  = currentData?.skills_grouped?.core      || [];
+  const tgtCore     = targetData?.skills_grouped?.core       || [];
+  const tgtTech     = targetData?.skills_grouped?.technical  || [];
+  const isTransition = !!(tgtTitle && tgtTitle !== currTitle);
 
-  // Build context block
   const ctx = [
     `CURRENT ROLE: ${currTitle}`,
-    tgtTitle          ? `TARGET ROLE: ${tgtTitle}` : null,
-    yearsExp          ? `YEARS OF EXPERIENCE: ${yearsExp}` : null,
-    skillList.length  ? `USER'S SKILLS: ${skillList.slice(0, 20).join(", ")}` : null,
-    coreSkills.length ? `CORE COMPETENCIES (${currTitle}): ${coreSkills.slice(0, 8).join(", ")}` : null,
-    tgtCore.length    ? `TARGET ROLE CORE SKILLS (${tgtTitle}): ${tgtCore.slice(0, 8).join(", ")}` : null,
-    tgtTech.length    ? `TARGET ROLE TECHNICAL SKILLS: ${tgtTech.slice(0, 6).join(", ")}` : null,
-    industry          ? `INDUSTRY: ${industry}` : null,
-    resumeText        ? `\nCANDIDATE CV / BACKGROUND:\n${resumeText.slice(0, 2000)}` : null,
-    jobDescription    ? `\nTARGET JOB DESCRIPTION:\n${jobDescription.slice(0, 1000)}` : null,
+    tgtTitle         ? `TARGET ROLE: ${tgtTitle}` : null,
+    isTransition     ? `TRANSITION TYPE: Career change from ${currTitle} to ${tgtTitle}` : null,
+    yearsExp         ? `YEARS OF EXPERIENCE: ${yearsExp}` : null,
+    skillList.length ? `CANDIDATE SKILLS: ${skillList.slice(0, 20).join(", ")}` : null,
+    coreSkills.length? `CURRENT ROLE CORE SKILLS: ${coreSkills.slice(0, 8).join(", ")}` : null,
+    tgtCore.length   ? `TARGET ROLE CORE SKILLS: ${tgtCore.slice(0, 8).join(", ")}` : null,
+    tgtTech.length   ? `TARGET ROLE TECHNICAL SKILLS: ${tgtTech.slice(0, 6).join(", ")}` : null,
+    industry         ? `INDUSTRY: ${industry}` : null,
+    resumeText       ? `\nCANDIDATE CV:\n${resumeText.slice(0, 2000)}` : null,
+    jobDescription   ? `\nTARGET JOB DESCRIPTION:\n${jobDescription.slice(0, 1000)}` : null,
   ].filter(Boolean).join("\n");
 
-  const system = `You are an elite UK LinkedIn copywriter and career strategist.
-You write actual copy-ready content — not templates, not guidance, not examples.
-Every word must be directly usable by the candidate.
+  const system = `You are an elite UK LinkedIn copywriter and career strategist producing a premium profile audit report.
+You write concrete, copy-ready content — never generic guidance, never templates with bracketed placeholders.
 
 RULES:
-- UK spelling throughout (organise, optimise, recognise, programme)
-- No first-person pronouns in About section (no "I", "my", "me")
-- No buzzwords without substance (no "passionate", "results-driven", "synergy")
-- Experience bullets: use realistic, conservative phrasing. If metrics are unknown, 
-  write "driving measurable improvement" rather than inventing specific numbers.
-  Only use specific numbers (%, £, counts) if they appear in the candidate's CV text.
-- Headlines: under 220 characters. Count carefully.
-- About section: 1,500–1,900 characters. Count carefully.
-- Return ONLY valid JSON. No markdown, no backticks, no explanation.`;
+- UK spelling: organise, optimise, specialise, recognise, programme
+- About section: no first-person pronouns (no I / my / me)
+- No buzzwords without substance: no "passionate", "results-driven", "dynamic", "synergy"
+- Metrics: only use numbers that appear in the candidate's CV. If none, use realistic conservative language.
+- Headlines: hard max 220 characters. Count every character.
+- About section: 1,500–1,900 characters total. Count carefully.
+- Profile audit scores must be calibrated to the actual strength of information provided
+- biggest_issues must reference this candidate's specific role and transition — not generic LinkedIn advice
+- before_after "before" examples must look like real typical weak profiles, not straw men
+- Return ONLY valid JSON. No markdown, no backticks, no prose outside JSON.`;
 
   const user = `${ctx}
 
-Generate complete, copy-ready LinkedIn profile content. Return this exact JSON structure:
+Generate a complete LinkedIn profile audit and rewrite. Return this exact JSON:
 
 {
+  "profile_audit": {
+    "overall_score": 0,
+    "grade": "One of: Needs Work | Developing | Good | Strong | Excellent",
+    "breakdown": {
+      "headline":       { "score": 0, "note": "1 sentence on what's strong or weak about their likely current headline" },
+      "about_section":  { "score": 0, "note": "1 sentence diagnosis" },
+      "keywords":       { "score": 0, "note": "1 sentence on keyword density and search visibility" },
+      "positioning":    { "score": 0, "note": "1 sentence on how clearly their career direction comes across" },
+      "completeness":   { "score": 0, "note": "1 sentence on profile completeness for this role type" }
+    },
+    "biggest_issues": [
+      {
+        "issue": "Precise, specific name of the problem — e.g. 'Headline reads as a job title, not a value proposition'",
+        "why_it_hurts": "Why this specific issue costs them opportunities. Reference their role type. 1–2 sentences.",
+        "fix": "The exact change to make. Specific and actionable. 1 sentence."
+      },
+      {
+        "issue": "Second issue — specific to this candidate's situation",
+        "why_it_hurts": "string",
+        "fix": "string"
+      },
+      {
+        "issue": "Third issue",
+        "why_it_hurts": "string",
+        "fix": "string"
+      }
+    ]
+  },
+
+  "before_after": {
+    "headline": {
+      "before": "A realistic example of the weak headline they probably have now — job title heavy, no value prop",
+      "after": "The upgraded recommended headline — keyword-rich, value-driven"
+    },
+    "about_opening": {
+      "before": "A realistic weak About opening they probably have — generic, duty-list, no hook",
+      "after": "The strong hook opening from the written About section — first 2 sentences only"
+    },
+    "experience_bullet": {
+      "before": "A weak experience bullet they might have — passive, duty-focused, no outcome",
+      "after": "An upgraded version — action verb, specific responsibility, realistic outcome"
+    }
+  },
+
   "headlines": {
     "recommended": {
-      "text": "The single best headline for this person — max 220 chars, keyword-rich, specific to their background",
+      "text": "Best headline — max 220 chars, keyword-rich, specific to this background and target",
       "char_count": 0,
-      "why": "One sentence explaining why this is the strongest option"
+      "why": "Why this is the strongest option for this specific person. 1 sentence.",
+      "when_to_use": "The specific situation or application context where this headline performs best. 1 sentence."
     },
     "alternatives": [
       {
-        "text": "Alternative headline option 1 — different angle",
+        "text": "Alternative headline — different angle",
         "char_count": 0,
-        "label": "Short descriptive label e.g. 'SEO-focused' or 'Transition-signalling' or 'Seniority-led'",
-        "why": "One sentence rationale"
+        "label": "Short descriptive label e.g. 'SEO-focused' / 'Transition-signalling' / 'Seniority-led'",
+        "why": "1 sentence rationale",
+        "when_to_use": "1 sentence on when to switch to this version"
       },
       {
-        "text": "Alternative headline option 2",
+        "text": "Alternative 2",
         "char_count": 0,
-        "label": "Short label",
-        "why": "One sentence rationale"
+        "label": "Label",
+        "why": "string",
+        "when_to_use": "string"
       },
       {
-        "text": "Alternative headline option 3",
+        "text": "Alternative 3",
         "char_count": 0,
-        "label": "Short label",
-        "why": "One sentence rationale"
+        "label": "Label",
+        "why": "string",
+        "when_to_use": "string"
       }
     ]
   },
 
   "about_section": {
-    "text": "Complete About section. 1,500–1,900 characters. Structure: Strong hook (1–2 lines that grab attention) → Core expertise paragraph → Impact/achievement paragraph → Career direction sentence → CTA. Use real paragraph breaks with actual newline characters. No bullet points. No pronouns. Specific, authentic, not corporate.",
+    "text": "Full About section — 1,500–1,900 chars. Hook → expertise paragraph → impact paragraph → direction sentence → CTA. Real paragraph breaks. No pronouns. No buzzwords. Specific and authentic.",
     "char_count": 0,
-    "hashtags": ["#RelevantHashtag1", "#RelevantHashtag2", "#RelevantHashtag3"]
+    "hashtags": ["#Hashtag1", "#Hashtag2", "#Hashtag3"],
+    "structured_breakdown": {
+      "hook": "Just the opening 1–2 sentences from the About section — the hook paragraph only",
+      "value_prop": "The expertise / core value paragraph — copy from the full text",
+      "transition": "The career direction sentence — how the narrative moves toward target role",
+      "cta": "The closing call-to-action sentence"
+    }
   },
 
   "experience_rewrites": [
     {
-      "role_title": "Extract each distinct role from the CV — if no CV provided, use current role title",
-      "company": "Company name if mentioned in CV, otherwise empty string",
+      "role_title": "Job title — extract from CV or use current role",
+      "company": "Company if in CV, else empty string",
       "bullets": [
-        "Strong action verb + specific responsibility + realistic outcome (no invented numbers unless in CV)",
-        "Led cross-functional initiative that improved process efficiency and stakeholder alignment",
-        "Built and maintained relationships with key accounts, contributing to revenue retention",
-        "Collaborated with senior leadership to develop strategy that shaped team direction",
-        "Delivered [specific project type] on time and within scope, earning positive stakeholder feedback"
+        "Action verb + specific responsibility + realistic outcome. No invented numbers unless in CV.",
+        "Second bullet — same format",
+        "Third bullet",
+        "Fourth bullet"
       ]
     }
   ],
 
+  "keywords": {
+    "high_demand": [
+      {
+        "keyword": "Keyword name",
+        "why_it_matters": "Why recruiters and algorithms weight this keyword for ${tgtTitle || currTitle}. 1 sentence.",
+        "where_to_use": "Headline | About | Skills | Experience — or combination"
+      },
+      { "keyword": "string", "why_it_matters": "string", "where_to_use": "string" },
+      { "keyword": "string", "why_it_matters": "string", "where_to_use": "string" },
+      { "keyword": "string", "why_it_matters": "string", "where_to_use": "string" },
+      { "keyword": "string", "why_it_matters": "string", "where_to_use": "string" }
+    ],
+    "missing_critical": [
+      {
+        "keyword": "Keyword they are likely missing",
+        "why_it_matters": "What they lose by not having this keyword visible. 1 sentence.",
+        "impact": "High | Medium"
+      },
+      { "keyword": "string", "why_it_matters": "string", "impact": "string" },
+      { "keyword": "string", "why_it_matters": "string", "impact": "string" },
+      { "keyword": "string", "why_it_matters": "string", "impact": "string" }
+    ],
+    "currently_strong": ["keyword that likely already exists in their profile", "keyword2", "keyword3"]
+  },
+
   "skills": {
-    "core": ["Top 6–8 skills essential for the target role — prioritise these"],
-    "supporting": ["6–8 complementary skills that strengthen the profile"],
-    "missing": ["5–6 skills the candidate likely lacks for the target role — most important gaps first"]
+    "core":       ["Top 6–8 skills essential for ${tgtTitle || currTitle}"],
+    "supporting": ["6–8 complementary skills"],
+    "missing":    ["5–6 skills to add — most important first"]
   },
 
   "positioning_strategy": {
-    "angle": "The strongest narrative angle for this specific transition. 2 sentences.",
-    "bridge_message": "How to frame the move from current to target role in a credible, authentic way. 2 sentences.",
-    "credibility_signal": "The single most compelling thing about this candidate's background for the target role. 1 sentence."
+    "angle": "The strongest narrative angle for this profile. 2 sentences.",
+    "bridge_message": "How to frame current → target in a credible way. 2 sentences.",
+    "credibility_signal": "The single most compelling thing about this candidate. 1 sentence."
   }
 }
 
-IMPORTANT: 
-- Calculate actual char_count values for headlines and about_section
-- Experience bullets must be realistic — do NOT invent company names, revenue figures, team sizes, or percentages unless they appear in the CV text provided
-- If no CV is provided, write 1 role block for the current role with 4 strong, realistic bullets
-- skills.missing should reflect what the target role requires that the candidate hasn't demonstrated`;
+CRITICAL RULES:
+- profile_audit.overall_score: base this on how much information was provided. Without CV: 40–55. With CV and target role: 55–75. Calibrate breakdown scores independently.
+- biggest_issues must be transition/role specific — not generic "add more skills" advice
+- before_after.headline "before" must look like a real person's weak headline — not obviously fake
+- keywords.high_demand must reference why this keyword matters for THIS target role specifically
+- Calculate char_count accurately for every headline and the about_section`;
 
-  const raw = await _callAI(system, user);
+  const raw    = await _callAI(system, user);
   const parsed = _parseJson(raw);
 
-  // Post-process: calculate char counts if AI didn't
+  // Post-process char counts
   if (parsed.headlines?.recommended?.text && !parsed.headlines.recommended.char_count) {
     parsed.headlines.recommended.char_count = parsed.headlines.recommended.text.length;
   }
   if (parsed.headlines?.alternatives) {
-    parsed.headlines.alternatives = parsed.headlines.alternatives.map((h) => ({
-      ...h,
-      char_count: h.char_count || h.text?.length || 0,
+    parsed.headlines.alternatives = parsed.headlines.alternatives.map(h => ({
+      ...h, char_count: h.char_count || h.text?.length || 0,
     }));
   }
   if (parsed.about_section?.text && !parsed.about_section.char_count) {
@@ -230,17 +301,20 @@ IMPORTANT:
   return parsed;
 }
 
-// ===========================================================================
+// =============================================================================
 // Helpers
-// ===========================================================================
+// =============================================================================
 
 function _emptyAI() {
   return {
-    headlines: null,
-    about_section: null,
+    profile_audit:       null,
+    before_after:        null,
+    headlines:           null,
+    about_section:       null,
     experience_rewrites: [],
-    skills: null,
-    positioning_strategy: null,
+    keywords:            null,
+    skills:              null,
+    positioning_strategy:null,
   };
 }
 
