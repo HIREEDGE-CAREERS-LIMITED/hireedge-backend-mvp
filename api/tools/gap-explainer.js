@@ -1,14 +1,12 @@
 // ============================================================================
 // api/tools/career-gap-explainer.js
-// HireEdge Backend -- Career Gap Explainer (v2)
+// HireEdge Backend -- Career Gap Diagnostic (v4)
 //
-// Upgraded to produce a full 10-section diagnostic:
-//   hero  transition_verdict  gap_breakdown  skill_gap_deep_dive
-//   experience_gap  market_gap  gap_severity_map  reality_check
-//   fix_priority_plan  if_ignored
+// GET ?action=explain&from=SLUG&to=SLUG
 //
-// Supports:
-//   GET ?action=explain&from=SLUG&to=SLUG
+// Returns full 10-section diagnostic matching the v4 frontend data shape:
+//   hero, verdict, gap_origins, gap_scoreboard, missing_skills,
+//   experience_gaps, market_perception, fits_now, fix_plan, risk_if_ignored
 // ============================================================================
 
 import OpenAI from "openai";
@@ -24,212 +22,204 @@ export default async function handler(req, res) {
   if (req.method !== "GET")    return res.status(405).json({ error: "Method not allowed" });
 
   const { action, from, to } = req.query;
-  if (action !== "explain")  return res.status(400).json({ ok: false, error: "action=explain required" });
-  if (!from || !to)          return res.status(400).json({ ok: false, error: "from and to slugs required" });
+  if (action !== "explain") return res.status(400).json({ ok: false, error: "action=explain required" });
+  if (!from || !to)         return res.status(400).json({ ok: false, error: "from and to required" });
 
   const fromData = getRoleBySlug(from);
   const toData   = getRoleBySlug(to);
-
-  if (!fromData) return res.status(404).json({ ok: false, error: `Role not found: ${from}` });
-  if (!toData)   return res.status(404).json({ ok: false, error: `Role not found: ${to}` });
+  if (!fromData) return res.status(404).json({ ok: false, error: "Role not found: " + from });
+  if (!toData)   return res.status(404).json({ ok: false, error: "Role not found: " + to });
 
   const fromTitle = fromData.title;
   const toTitle   = toData.title;
 
-  let data = _emptyData(fromTitle, toTitle);
-
+  let data = emptyData(fromTitle, toTitle);
   if (process.env.OPENAI_API_KEY) {
-    try {
-      data = await _generateDiagnostic({ fromData, toData, fromTitle, toTitle });
-    } catch (err) {
-      console.error("[gap-explainer] AI error:", err.message);
-    }
+    try { data = await generate({ fromData, toData, fromTitle, toTitle }); }
+    catch (e) { console.error("[gap-explainer]", e.message); }
   }
 
   return res.status(200).json({ ok: true, data });
 }
 
-// =============================================================================
+// ============================================================================
 // AI generation
-// =============================================================================
+// ============================================================================
 
-async function _generateDiagnostic({ fromData, toData, fromTitle, toTitle }) {
+async function generate({ fromData, toData, fromTitle, toTitle }) {
   const fromCore = fromData?.skills_grouped?.core      || [];
   const fromTech = fromData?.skills_grouped?.technical || [];
   const toCore   = toData?.skills_grouped?.core        || [];
   const toTech   = toData?.skills_grouped?.technical   || [];
-
-  const salaryFrom = fromData?.salary_uk?.mean ? `~${fromData.salary_uk.mean.toLocaleString()}` : null;
-  const salaryTo   = toData?.salary_uk?.mean   ? `~${toData.salary_uk.mean.toLocaleString()}`   : null;
+  const salFrom  = fromData?.salary_uk?.mean ? "~GBP" + fromData.salary_uk.mean.toLocaleString() : null;
+  const salTo    = toData?.salary_uk?.mean   ? "~GBP" + toData.salary_uk.mean.toLocaleString()   : null;
 
   const ctx = [
-    `FROM ROLE: ${fromTitle} (${fromData.category}, ${fromData.seniority})`,
-    salaryFrom ? `FROM SALARY BAND: ${salaryFrom}` : null,
-    `TO ROLE: ${toTitle} (${toData.category}, ${toData.seniority})`,
-    salaryTo ? `TO SALARY BAND: ${salaryTo}` : null,
-    fromCore.length ? `${fromTitle} CORE SKILLS: ${fromCore.slice(0, 8).join(", ")}` : null,
-    fromTech.length ? `${fromTitle} TECHNICAL SKILLS: ${fromTech.slice(0, 6).join(", ")}` : null,
-    toCore.length   ? `${toTitle} REQUIRED CORE SKILLS: ${toCore.slice(0, 8).join(", ")}` : null,
-    toTech.length   ? `${toTitle} REQUIRED TECHNICAL SKILLS: ${toTech.slice(0, 6).join(", ")}` : null,
+    "FROM: " + fromTitle + " (" + fromData.category + ", " + fromData.seniority + ")" + (salFrom ? " " + salFrom : ""),
+    "TO: "   + toTitle   + " (" + toData.category   + ", " + toData.seniority   + ")" + (salTo   ? " " + salTo   : ""),
+    fromCore.length ? fromTitle + " SKILLS: " + fromCore.slice(0, 8).join(", ") : null,
+    fromTech.length ? fromTitle + " TECH: "   + fromTech.slice(0, 5).join(", ") : null,
+    toCore.length   ? toTitle   + " REQUIRED: "  + toCore.slice(0, 8).join(", ") : null,
+    toTech.length   ? toTitle   + " TECH REQUIRED: " + toTech.slice(0, 5).join(", ") : null,
   ].filter(Boolean).join("\n");
 
-  const system = `You are a senior career strategist and talent market expert producing a precise gap diagnostic report.
+  const system = `You are a senior talent strategist producing a Career Gap Diagnostic.
+Rules:
+- Every statement must reference the specific roles, not generic career concepts
+- Be honest about difficulty -- do not soften the reality
+- UK market context throughout. UK spelling
+- Short sentences. No filler.
+- Return ONLY valid JSON. No markdown, no backticks.`;
 
-This is a diagnostic tool -- it must explain WHY a career transition is hard or easy with surgical precision.
+  const user = ctx + `
 
-STANDARDS:
-- Every output must reference the specific roles, not generic career advice
-- Be honest about difficulty -- don't soften the reality
-- Lead with the most important information
-- UK market context throughout
-- Short, direct, professional prose -- no filler
-- UK spelling
+Produce a full Career Gap Diagnostic from ` + fromTitle + ` to ` + toTitle + `.
 
-Return ONLY valid JSON. No markdown, no backticks, no prose outside the JSON.`;
-
-  const user = `${ctx}
-
-Generate a full 10-section Career Gap Diagnostic from ${fromTitle} to ${toTitle}.
-
-Return this EXACT JSON structure:
+Return this EXACT JSON:
 
 {
   "hero": {
-    "title": "One sharp sentence explaining why this transition is hard/easy -- e.g. 'Why moving from ${fromTitle} to ${toTitle} is a significant structural career change'",
+    "title": "One sharp sentence: why moving from ` + fromTitle + ` to ` + toTitle + ` is [hard/achievable/straightforward]",
     "gap_severity": "High | Medium | Low",
     "skill_match_pct": 0,
     "transition_difficulty": "Hard | Medium | Easy"
   },
 
-  "transition_verdict": "One strong paragraph (3-5 sentences) -- is this transition realistic, why, and what the main blockers are. No fluff. Specific to these two roles.",
-
-  "gap_breakdown": {
-    "skill_gaps": [
-      {
-        "title": "Named specific skill gap -- e.g. 'Product Roadmapping & Prioritisation'",
-        "severity": "High | Medium | Low",
-        "explanation": "1 sentence: why this gap exists given the from role",
-        "why_it_matters": "1 sentence: why this gap matters for the to role specifically"
-      }
-    ],
-    "experience_gaps": [
-      {
-        "title": "Named real-world experience gap",
-        "severity": "High | Medium | Low",
-        "explanation": "1 sentence on the gap",
-        "why_it_matters": "1 sentence on why it matters"
-      }
-    ],
-    "market_gaps": [
-      {
-        "title": "Named market positioning gap",
-        "severity": "High | Medium | Low",
-        "explanation": "1 sentence",
-        "why_it_matters": "1 sentence"
-      }
-    ]
+  "verdict": {
+    "headline": "One bold diagnostic sentence summarising the entire situation -- the most important thing to know",
+    "is_realistic": true,
+    "biggest_blocker": "The single most important gap preventing this transition right now -- specific, not generic",
+    "biggest_advantage": "The strongest transferable asset from ` + fromTitle + ` that helps in ` + toTitle + `",
+    "summary": "2-3 sentences: is this realistic, why, what is the structural challenge"
   },
 
-  "skill_gap_deep_dive": [
-    {
-      "skill": "Specific skill name -- e.g. 'Product Roadmapping'",
-      "current": "Level in ${fromTitle} -- e.g. 'Low exposure' or 'Indirect exposure only'",
-      "required": "Level needed in ${toTitle} -- e.g. 'Core daily skill' or 'Advanced proficiency'",
-      "impact": "1 sentence: what this limits if not addressed"
-    }
-  ],
-
-  "experience_gap": [
-    {
-      "gap": "Named missing real-world experience -- e.g. 'No product lifecycle ownership'",
+  "gap_origins": {
+    "skill_gap": {
       "severity": "High | Medium | Low",
-      "explanation": "1 sentence: specifically what is missing and why the from role doesn't provide it"
+      "explanation": "2 sentences: what the skill gap actually is -- name the specific skills",
+      "why_it_matters": "1 sentence: what this gap costs in interviews or on the job"
+    },
+    "experience_gap": {
+      "severity": "High | Medium | Low",
+      "explanation": "2 sentences: what real-world experience is missing",
+      "why_it_matters": "1 sentence: why hiring managers care about this"
+    },
+    "market_gap": {
+      "severity": "High | Medium | Low",
+      "explanation": "2 sentences: how the market currently categorises this profile",
+      "why_it_matters": "1 sentence: the commercial consequence of this positioning gap"
+    }
+  },
+
+  "gap_scoreboard": {
+    "skills_readiness": 0,
+    "experience_readiness": 0,
+    "market_readiness": 0,
+    "transition_risk": 0,
+    "overall_note": "1 sentence on what the scoreboard tells us overall"
+  },
+
+  "missing_skills": [
+    {
+      "skill": "Specific named skill -- not a category",
+      "severity": "High | Medium | Low",
+      "why_it_matters": "1 sentence: what this gap costs in ` + toTitle + ` roles",
+      "how_to_close": "1 sentence: the most direct way to build this",
+      "time_estimate": "e.g. 4-6 weeks"
     }
   ],
 
-  "market_gap": {
-    "recruiter_view": "2 sentences: what a recruiter sees when they open this candidate's CV -- their first impression and concern",
-    "hiring_manager_view": "2 sentences: what a hiring manager thinks when they interview this profile for the target role",
-    "positioning_gap": "1-2 sentences: the core narrative gap between how this candidate presents vs. what the target role demands"
-  },
-
-  "gap_severity_map": {
-    "skills_pct": 0,
-    "experience_pct": 0,
-    "market_pct": 0,
-    "overall_note": "1 sentence: where the biggest concentration of gap sits and what this means"
-  },
-
-  "reality_check": {
-    "why_delayed": "2 sentences: the structural reasons this transition takes time -- not willpower, but hard realities",
-    "where_youll_struggle": "2 sentences: the specific interview/onboarding moments where this gap becomes painful",
-    "fits_now": "The specific role or level that is a realistic fit today -- be honest. e.g. 'Associate Product Manager or Product Analyst roles at smaller companies'"
-  },
-
-  "fix_priority_plan": [
+  "experience_gaps": [
     {
-      "action": "Specific, named, completable action -- not a vague goal",
-      "why_it_matters": "1 sentence: why this is the #1 highest-leverage fix",
-      "time_estimate": "e.g. '2-4 weeks' or '1 month'"
+      "gap": "Named missing experience -- e.g. 'No product roadmap ownership'",
+      "severity": "High | Medium | Low",
+      "explanation": "1-2 sentences: why ` + fromTitle + ` background does not provide this"
+    }
+  ],
+
+  "market_perception": {
+    "recruiter_view": "2 sentences: what a recruiter thinks when they see this profile applying for ` + toTitle + `",
+    "hiring_manager_view": "2 sentences: what a hiring manager thinks during the interview",
+    "positioning_gap": "1-2 sentences: the core narrative mismatch between current profile and target role expectations"
+  },
+
+  "fits_now": {
+    "current_fit": "The specific roles this profile is competitive for TODAY -- be honest and name actual roles",
+    "stretch_fit": "Roles that are possible with 3-6 months of targeted preparation",
+    "not_yet": "Why ` + toTitle + ` is not yet realistic -- specific reasons",
+    "bridge_roles": ["Role 1", "Role 2", "Role 3"]
+  },
+
+  "fix_plan": [
+    {
+      "action": "Specific, named, completable action -- not a strategy statement",
+      "why_first": "1 sentence: why this is the highest-leverage first move",
+      "expected_outcome": "1 sentence: what changes once this is done",
+      "time_estimate": "e.g. 2-4 weeks"
     },
     {
       "action": "string",
-      "why_it_matters": "string",
+      "why_first": "string",
+      "expected_outcome": "string",
       "time_estimate": "string"
     },
     {
       "action": "string",
-      "why_it_matters": "string",
+      "why_first": "string",
+      "expected_outcome": "string",
       "time_estimate": "string"
     }
   ],
 
-  "if_ignored": [
-    "What happens if nothing changes -- 1 sentence, specific and honest. E.g. 'Transition to ${toTitle} becomes increasingly unlikely as junior candidates with direct experience accumulate in the market'",
-    "Second consequence",
-    "Third consequence",
-    "Fourth consequence"
+  "risk_if_ignored": [
+    "Specific consequence 1 -- what happens to this profile if nothing changes in 12 months",
+    "Specific consequence 2",
+    "Specific consequence 3",
+    "Specific consequence 4"
   ]
 }
 
-CALIBRATION RULES:
-- skill_match_pct: honest percentage of overlap between the two skill sets (0-100)
-- gap_severity_map percentages must add to 100
-- gap_severity_map scores should reflect true weighting -- not 33/33/33
-- fix_priority_plan actions must be concrete and completable -- not goals or strategies
-- if_ignored items must be direct consequences, not generic warnings
-- Minimum: 3 skill_gaps, 3 experience_gap items, 3 fix_priority_plan items, 4 if_ignored items
-- skill_gap_deep_dive: minimum 4 items`;
+CALIBRATION:
+- skill_match_pct: honest 0-100 based on actual skill overlap between the two roles
+- gap_scoreboard values: spread across a real range -- do not cluster at 50
+- transition_risk: higher = more risky (opposite direction to readiness scores)
+- missing_skills: minimum 5 items, maximum 8
+- experience_gaps: minimum 4 items
+- All text must reference the specific roles -- zero generic career advice`;
 
-  const raw = await _callAI(system, user);
-  return _parseJson(raw);
+  const raw = await callAI(system, user);
+  return parseJson(raw);
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
+// ============================================================================
+// Fallback empty data
+// ============================================================================
 
-function _emptyData(fromTitle, toTitle) {
+function emptyData(fromTitle, toTitle) {
   return {
     hero: {
-      title: `Career gap analysis: ${fromTitle}  ${toTitle}`,
+      title: "Career gap analysis: " + fromTitle + " to " + toTitle,
       gap_severity: "Medium",
       skill_match_pct: 0,
       transition_difficulty: "Medium",
     },
-    transition_verdict:    null,
-    gap_breakdown:         { skill_gaps: [], experience_gaps: [], market_gaps: [] },
-    skill_gap_deep_dive:   [],
-    experience_gap:        [],
-    market_gap:            null,
-    gap_severity_map:      { skills_pct: 50, experience_pct: 40, market_pct: 10, overall_note: null },
-    reality_check:         null,
-    fix_priority_plan:     [],
-    if_ignored:            [],
+    verdict:           null,
+    gap_origins:       null,
+    gap_scoreboard:    { skills_readiness: 0, experience_readiness: 0, market_readiness: 0, transition_risk: 0 },
+    missing_skills:    [],
+    experience_gaps:   [],
+    market_perception: null,
+    fits_now:          null,
+    fix_plan:          [],
+    risk_if_ignored:   [],
   };
 }
 
-async function _callAI(system, user) {
+// ============================================================================
+// Helpers
+// ============================================================================
+
+async function callAI(system, user) {
   const r = await openai.responses.create({
     model: "gpt-4o-mini",
     input: [
@@ -240,7 +230,7 @@ async function _callAI(system, user) {
   return r.output?.[0]?.content?.[0]?.text?.trim() ?? "{}";
 }
 
-function _parseJson(raw) {
+function parseJson(raw) {
   let t = (raw || "").trim().replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "").trim();
   try { return JSON.parse(t); } catch {
     const m = t.match(/\{[\s\S]*\}/);
