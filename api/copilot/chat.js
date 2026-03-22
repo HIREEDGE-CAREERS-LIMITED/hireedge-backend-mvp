@@ -1,17 +1,15 @@
 // ============================================================================
 // api/copilot/chat.js
 // HireEdge Backend -- EDGEX Chat Intelligence (v2)
-// Fixes: [ACTIONS] parsing, clean reply separation, structured system prompt
+// Fix: require() -> import (ES module -- matches rest of backend)
 // ============================================================================
 
-const OpenAI = require("openai");
+import OpenAI from "openai";
+import { composeChatResponse } from "../../lib/copilot/responseComposer.js";
 
-let openai = null;
-if (process.env.OPENAI_API_KEY) {
-  openai = new OpenAI.default({ apiKey: process.env.OPENAI_API_KEY });
-}
-
-// ── System prompt ─────────────────────────────────────────────────────────
+const openai = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
 
 const SYSTEM = `You are EDGEX -- HireEdge's Career Intelligence Engine.
 
@@ -62,23 +60,19 @@ Direct users to HireEdge tools when relevant:
 - LinkedIn Optimiser: full profile rewrite for target role
 - Interview Prep: role-specific questions and STAR answers
 - Resume Optimiser: CV gap analysis and reframe
-- Career Pack: unified transition plan (positioning + gaps + pathway + visa + 30/60/90)
+- Career Pack: full unified transition plan (paid)
 
 MONETISATION:
-When the conversation reaches a natural depth point, add a tasteful nudge:
-- "Want a full transition plan that connects all of this? Career Pack turns this into a complete 30/60/90 report."
-- Only once per conversation. Do not repeat.
+When the conversation reaches a natural depth point, add a tasteful nudge once:
+"Want a full transition plan that connects all of this? Career Pack turns this into a complete 30/60/90 report."
 
 NEXT ACTIONS FORMAT:
-At the very end of every response, append exactly this block.
-Do NOT include any text between [/ACTIONS] and the end of your message.
+At the very end of every response, append exactly this block. No text after [/ACTIONS].
 [ACTIONS]
-[{"type":"question","label":"Short label under 6 words","prompt":"Full question text the user would ask"},{"type":"tool","label":"Open tool name","endpoint":"/api/tools/career-gap-explainer","prompt":"unused for tool type"}]
+[{"type":"question","label":"Short label under 6 words","prompt":"Full question text"},{"type":"tool","label":"Open tool name","endpoint":"/api/tools/career-gap-explainer","prompt":"unused"}]
 [/ACTIONS]
 
-The array must be valid JSON. Use 2-3 actions per response. Mix question and tool types.`;
-
-// ── Handler ───────────────────────────────────────────────────────────────
+Use 2-3 actions. Mix question and tool types. Array must be valid JSON.`;
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -103,8 +97,6 @@ export default async function handler(req, res) {
     if (openai) {
       return res.status(200).json(await aiResponse(message.trim(), context || {}));
     }
-    // Fallback to keyword engine if no API key
-    const { composeChatResponse } = require("../../lib/copilot/responseComposer.js");
     return res.status(200).json(composeChatResponse(message.trim(), context || {}));
   } catch (err) {
     console.error("[edgex/chat]", err);
@@ -115,8 +107,6 @@ export default async function handler(req, res) {
     });
   }
 }
-
-// ── AI generation ─────────────────────────────────────────────────────────
 
 async function aiResponse(message, context) {
   const completion = await openai.chat.completions.create({
@@ -130,51 +120,32 @@ async function aiResponse(message, context) {
   });
 
   const raw = completion.choices?.[0]?.message?.content?.trim() || "";
-
-  // ── CRITICAL: strip [ACTIONS] before sending to frontend ─────────────────
   const { reply, nextActions } = parseActions(raw);
 
   return {
     ok: true,
     data: {
-      reply,                                     // clean text only -- no [ACTIONS]
+      reply,
       intent: { name: detectIntent(message), confidence: 0.85 },
       insights: null,
       recommendations: [],
-      next_actions: nextActions,                 // parsed array
+      next_actions: nextActions,
       context: updateCtx(context, message, detectIntent(message)),
     },
   };
 }
 
-// ── Parse [ACTIONS] block out of raw AI output ────────────────────────────
-
 function parseActions(raw) {
   const match = raw.match(/\[ACTIONS\]([\s\S]*?)\[\/ACTIONS\]/);
-
-  if (!match) {
-    // No actions block -- return raw as reply with empty actions
-    return { reply: raw.trim(), nextActions: [] };
-  }
-
+  if (!match) return { reply: raw.trim(), nextActions: [] };
   let nextActions = [];
   try {
-    const jsonStr = match[1].trim();
-    nextActions = JSON.parse(jsonStr);
+    nextActions = JSON.parse(match[1].trim());
     if (!Array.isArray(nextActions)) nextActions = [];
-  } catch {
-    nextActions = [];
-  }
-
-  // Remove the entire [ACTIONS]...[/ACTIONS] block from the reply
-  const reply = raw
-    .replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, "")
-    .trim();
-
+  } catch { nextActions = []; }
+  const reply = raw.replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, "").trim();
   return { reply, nextActions };
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────
 
 function buildUserMessage(message, context) {
   const lines = [message];
