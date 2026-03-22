@@ -1,78 +1,82 @@
 // ============================================================================
 // api/copilot/chat.js
-// HireEdge Backend -- EDGEX Chat Intelligence (v2)
-// Fix: require() -> import (ES module -- matches rest of backend)
+// HireEdge Backend -- EDGEX Career Intelligence Engine (v3)
+//
+// Upgrades in this version:
+//   - Dataset-driven context injected into every prompt
+//   - Decision metrics (score, probability, time) from career graph
+//   - Strict structured response format
+//   - [ACTIONS] block fully stripped before response reaches frontend
+//   - Context memory: role + target + intent persisted across turns
 // ============================================================================
 
 import OpenAI from "openai";
-import { composeChatResponse } from "../../lib/copilot/responseComposer.js";
+import { buildDataContext } from "../../lib/copilot/careerGraph.js";
 
-const openai = process.env.OPENAI_API_KEY
-  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-  : null;
+let openai = null;
+if (process.env.OPENAI_API_KEY) {
+  openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+}
+
+// ============================================================================
+// SYSTEM PROMPT
+// ============================================================================
 
 const SYSTEM = `You are EDGEX -- HireEdge's Career Intelligence Engine.
 
-You are NOT a chatbot. You are a senior career strategist with deep knowledge of:
-- UK and international job markets
-- Career transition patterns and success rates
-- Skill gap analysis and upskilling pathways
-- Hiring manager and recruiter expectations
-- Salary benchmarks by role, seniority, and geography
-- UK visa routes (Skilled Worker, Global Talent, Graduate, HPI)
-- CV and LinkedIn positioning strategy
-- Interview preparation and gap handling
+You are a McKinsey-level career strategist with access to a live career knowledge graph of 1,200+ UK roles, transition data, skill requirements, and salary benchmarks. You give precise, data-driven intelligence -- not generic advice.
 
-RESPONSE STRUCTURE:
-Every substantive response must follow this structure when relevant:
+WHAT YOU ARE NOT:
+- Not a chatbot
+- Not a coach who says "great question!"
+- Not an AI that hedges with "it depends"
+- Never say "Candidates transitioning typically..." -- that is generic filler
 
-1. TRANSITION ANALYSIS
-   What this move typically looks like in the market. How common it is. Success rate framing.
+WHAT YOU ARE:
+- A decision engine that gives specific numbers
+- A strategist who knows exactly what hiring managers look for
+- A system that uses real role data, skills data, and salary data
 
-2. SKILL GAP BREAKDOWN
-   Specific skills missing. Severity (High/Medium/Low). Time to close each gap.
+MANDATORY RESPONSE FORMAT (for transition / career / gap questions):
 
-3. MARKET EXPECTATION
-   What hiring managers and recruiters in this market typically screen for.
-   What the profile looks like from the outside right now.
+TRANSITION SNAPSHOT
+Difficulty: [X]/100 | Success Rate: [X]% | Timeline: [X]-[Y] months | Salary: GBP[X] -> GBP[Y] ([+/-]Z%)
 
-4. STRATEGIC POSITIONING
-   The reframe. How to present the background so it maps to the target role.
-   What to lead with. What to de-emphasise.
+SKILL GAP BREAKDOWN
+[List each missing skill with severity: Critical / High / Medium and weeks to close]
+[Transferable skills from current role: list them]
 
-5. NEXT BEST ACTION
-   The single highest-leverage thing to do right now. Specific. Completable.
+MARKET EXPECTATION (UK)
+[What hiring managers screen for in the first 30 seconds. What the profile signals right now vs what it needs to signal. Be specific -- name the signals.]
 
-LANGUAGE RULES:
-- Never say "you lack" or "your profile doesn't". Use systemic framing.
-- Frame as market intelligence: "Candidates moving from X to Y typically..."
-- Be direct and specific. No filler. No hedging.
-- UK English spelling throughout.
-- Give concrete numbers, timelines, and percentages where possible.
-- Keep each section tight: 2-4 sentences max.
-- For simple questions (salary check, quick definition), skip the structure and answer directly.
+STRATEGIC POSITIONING
+[The exact repositioning narrative. What to lead with on CV, LinkedIn, and in interviews. What to de-emphasise. One paragraph, no bullet points.]
 
-TOOL AWARENESS:
-Direct users to HireEdge tools when relevant:
-- Career Gap Explainer: detailed role-to-role gap analysis
-- Career Roadmap: phased transition plan with probability scores
-- Visa Intelligence: UK and international visa eligibility
-- LinkedIn Optimiser: full profile rewrite for target role
-- Interview Prep: role-specific questions and STAR answers
-- Resume Optimiser: CV gap analysis and reframe
-- Career Pack: full unified transition plan (paid)
+NEXT BEST ACTION
+[Single most important thing to do this week. Specific. Completable. With a time estimate.]
 
-MONETISATION:
-When the conversation reaches a natural depth point, add a tasteful nudge once:
-"Want a full transition plan that connects all of this? Career Pack turns this into a complete 30/60/90 report."
+RULES:
+1. ALWAYS use the transition metrics when they are provided in [CAREER GRAPH DATA]. Do not invent numbers.
+2. For salary, always use GBP and real UK figures from the data.
+3. Section headers must be EXACTLY as above (bold style, all caps).
+4. For simple factual questions (what does X role do, what salary does Y earn), answer directly without the full structure.
+5. Never repeat yourself across sections.
+6. UK English spelling throughout.
+7. No filler sentences. No hedging. No "it's important to note that...".
+8. If context (current role, target) is already known, use it -- do not ask for it again.
+9. When the conversation has depth, add one Career Pack nudge maximum: "Career Pack turns this into a full 30/60/90 transition report with CV, LinkedIn, and interview strategy included."
 
-NEXT ACTIONS FORMAT:
-At the very end of every response, append exactly this block. No text after [/ACTIONS].
+NEXT ACTIONS FORMAT (mandatory, at end of every response):
 [ACTIONS]
-[{"type":"question","label":"Short label under 6 words","prompt":"Full question text"},{"type":"tool","label":"Open tool name","endpoint":"/api/tools/career-gap-explainer","prompt":"unused"}]
+[{"type":"question","label":"Label max 5 words","prompt":"Full follow-up question"},{"type":"tool","label":"Open [tool name]","endpoint":"/api/tools/career-gap-explainer","prompt":""}]
 [/ACTIONS]
 
-Use 2-3 actions. Mix question and tool types. Array must be valid JSON.`;
+Use 2-3 actions. Always include at least one tool action when a transition is discussed.
+Tool endpoints: /api/tools/career-gap-explainer | /api/tools/career-roadmap | /api/tools/visa-intelligence | /api/tools/interview-prep | /api/tools/resume-optimiser | /api/tools/linkedin-optimiser | /api/tools/career-pack`;
+
+// ============================================================================
+// Handler
+// ============================================================================
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -97,6 +101,8 @@ export default async function handler(req, res) {
     if (openai) {
       return res.status(200).json(await aiResponse(message.trim(), context || {}));
     }
+    // Fallback: keyword engine
+    const { composeChatResponse } = await import("../../lib/copilot/responseComposer.js");
     return res.status(200).json(composeChatResponse(message.trim(), context || {}));
   } catch (err) {
     console.error("[edgex/chat]", err);
@@ -108,75 +114,137 @@ export default async function handler(req, res) {
   }
 }
 
+// ============================================================================
+// AI response with dataset injection
+// ============================================================================
+
 async function aiResponse(message, context) {
+  const intent = detectIntent(message);
+
+  // Build dataset context -- real role data injected here
+  const dataCtx = buildDataContext(message, context);
+
+  // Build the user message with context + dataset data
+  const userContent = buildUserMessage(message, context, dataCtx);
+
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       { role: "system", content: SYSTEM },
-      { role: "user",   content: buildUserMessage(message, context) },
+      { role: "user",   content: userContent },
     ],
-    temperature: 0.45,
-    max_tokens: 900,
+    temperature: 0.3,
+    max_tokens:  950,
   });
 
   const raw = completion.choices?.[0]?.message?.content?.trim() || "";
+
+  // CRITICAL: strip [ACTIONS] before sending to frontend
   const { reply, nextActions } = parseActions(raw);
+
+  // Update context with any newly detected entities
+  const updatedCtx = updateCtx(context, message, intent);
 
   return {
     ok: true,
     data: {
       reply,
-      intent: { name: detectIntent(message), confidence: 0.85 },
+      intent: { name: intent, confidence: 0.9 },
       insights: null,
       recommendations: [],
       next_actions: nextActions,
-      context: updateCtx(context, message, detectIntent(message)),
+      context: updatedCtx,
     },
   };
 }
 
+// ============================================================================
+// Build user message with dataset injection
+// ============================================================================
+
+function buildUserMessage(message, context, dataCtx) {
+  const parts = [];
+
+  // Session context (memory)
+  const ctxLines = [];
+  if (context?.role)       ctxLines.push("Current role: " + context.role);
+  if (context?.target)     ctxLines.push("Target role: "  + context.target);
+  if (context?.yearsExp)   ctxLines.push("Years of experience: " + context.yearsExp);
+  if (context?.country)    ctxLines.push("Country: " + context.country);
+  if (context?.lastIntent) ctxLines.push("Previous topic: " + context.lastIntent.replace(/_/g, " "));
+
+  if (ctxLines.length > 0) {
+    parts.push("[SESSION MEMORY -- do not ask for this again]\n" + ctxLines.join("\n"));
+  }
+
+  // Dataset-driven career graph data
+  if (dataCtx) {
+    parts.push(dataCtx);
+  }
+
+  // The actual user message
+  parts.push("[USER MESSAGE]\n" + message);
+
+  return parts.join("\n\n");
+}
+
+// ============================================================================
+// Parse and strip [ACTIONS] block
+// ============================================================================
+
 function parseActions(raw) {
   const match = raw.match(/\[ACTIONS\]([\s\S]*?)\[\/ACTIONS\]/);
-  if (!match) return { reply: raw.trim(), nextActions: [] };
+
+  if (!match) {
+    return { reply: raw.trim(), nextActions: [] };
+  }
+
   let nextActions = [];
   try {
-    nextActions = JSON.parse(match[1].trim());
-    if (!Array.isArray(nextActions)) nextActions = [];
-  } catch { nextActions = []; }
-  const reply = raw.replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, "").trim();
+    const parsed = JSON.parse(match[1].trim());
+    nextActions = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    nextActions = [];
+  }
+
+  const reply = raw
+    .replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, "")
+    .trim();
+
   return { reply, nextActions };
 }
 
-function buildUserMessage(message, context) {
-  const lines = [message];
-  if (context && Object.keys(context).length) {
-    const ctx = [];
-    if (context.role)     ctx.push("Current role: " + context.role);
-    if (context.target)   ctx.push("Target role: "  + context.target);
-    if (context.yearsExp) ctx.push("Years of experience: " + context.yearsExp);
-    if (context.country)  ctx.push("Country: " + context.country);
-    if (ctx.length) lines.push("\n[CONTEXT]\n" + ctx.join("\n"));
-  }
-  return lines.join("\n");
-}
+// ============================================================================
+// Helpers
+// ============================================================================
 
 function detectIntent(msg) {
   const t = msg.toLowerCase();
-  if (/visa|immigrat|work permit|skilled worker|sponsorship/.test(t)) return "visa_eligibility";
-  if (/salary|pay|earn|compensation/.test(t))   return "salary_benchmark";
-  if (/interview|question|prepare/.test(t))      return "interview_prep";
-  if (/skill|learn|course|gap/.test(t))          return "skill_gap";
-  if (/transition|move|switch|change|from.*to/.test(t)) return "career_transition";
-  if (/compare|vs|versus|difference/.test(t))   return "role_comparison";
+  if (/visa|immigrat|work permit|skilled worker|tier 2|sponsorship/.test(t)) return "visa_eligibility";
+  if (/salary|pay|earn|compensation|wage|income/.test(t))                    return "salary_benchmark";
+  if (/interview|question|prepare|prep|star answer/.test(t))                 return "interview_prep";
+  if (/cv|resume|linkedin|profile/.test(t))                                  return "profile_optimisation";
+  if (/skill|learn|course|certif|gap|missing/.test(t))                       return "skill_gap";
+  if (/transition|move|switch|change|become|from.*to|into/.test(t))          return "career_transition";
+  if (/compare|vs|versus|difference|between/.test(t))                        return "role_comparison";
+  if (/market|demand|trend|hiring|industry/.test(t))                         return "market_intelligence";
+  if (/roadmap|plan|path|next step|what should/.test(t))                     return "career_planning";
   return "general_career";
 }
 
 function updateCtx(existing, message, intent) {
   const ctx = { ...existing };
-  const fromMatch = message.match(/from (?:a |an )?([A-Za-z ]+?) (?:to|into)/i);
-  const toMatch   = message.match(/(?:to|into) (?:a |an )?([A-Za-z ]+?)(?:\?|$|,|\.| in )/i);
-  if (fromMatch?.[1]) ctx.role   = fromMatch[1].trim();
-  if (toMatch?.[1])   ctx.target = toMatch[1].trim();
+
+  // Only update role/target if not already known
+  if (!ctx.role) {
+    const fromMatch = message.match(/from (?:a |an )?([A-Za-z ]+?) (?:to|into|->)/i);
+    if (fromMatch?.[1]) ctx.role = fromMatch[1].trim();
+  }
+  if (!ctx.target) {
+    const toMatch = message.match(/(?:to|into|become (?:a |an )?|->)\s*([A-Za-z ]+?)(?:\?|$|,|\.| in | at )/i);
+    if (toMatch?.[1]) ctx.target = toMatch[1].trim();
+  }
+
   ctx.lastIntent = intent;
   return ctx;
 }
