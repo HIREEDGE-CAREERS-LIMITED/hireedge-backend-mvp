@@ -183,21 +183,16 @@ function extractRolesFromMessage(msg) {
 }
 
 function resolveContext(context, message) {
-  const resolved = {
-    role:     context?.role   || null,
-    target:   context?.target || null,
+  // Always try to extract roles from the current message first
+  const extracted = extractRolesFromMessage(message);
+
+  return {
+    // Message roles OVERRIDE context -- user explicitly stated new roles
+    role:     extracted.role   || context?.role   || null,
+    target:   extracted.target || context?.target || null,
     yearsExp: context?.yearsExp || null,
     country:  context?.country  || null,
   };
-
-  // Only extract from message if context is missing those fields
-  if (!resolved.role || !resolved.target) {
-    const extracted = extractRolesFromMessage(message);
-    if (!resolved.role   && extracted.role)   resolved.role   = extracted.role;
-    if (!resolved.target && extracted.target) resolved.target = extracted.target;
-  }
-
-  return resolved;
 }
 
 // ============================================================================
