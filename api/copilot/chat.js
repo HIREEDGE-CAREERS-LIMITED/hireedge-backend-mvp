@@ -131,6 +131,57 @@ function validateRequest(intent, context, message) {
 //
 // ============================================================================
 
+// Role extraction patterns -- ordered by specificity
+const ROLE_RE = [
+  // "from X to/into Y"
+  [/(?<![a-zA-Z])from\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)\s+(?:to|into)\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+(?:role|as|at|in)\b)/i, "both"],
+  // "I work/worked as a X and want/need..."
+  [/\bi\s+(?:work|worked)\s+as\s+(?:a |an )?([a-z][a-z -]{1,24}?)\s+and\s+(?:want|need|hope|plan|look)/i, "role"],
+  // "I work as a X" end of string
+  [/\bi\s+(?:work|worked)\s+as\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,25})$/i, "role"],
+  // "I am (currently) a X"
+  [/\bi\s+am\s+(?:currently\s+)?(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=\s+(?:and|looking|wanting|hoping|trying|aiming|moving|planning|who)\b|[,.]|$)/i, "role"],
+  // "currently a X"
+  [/\bcurrently\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|\s+(?:and|looking|aiming)\b|$)/i, "role"],
+  // "want to be/become/transition to X"
+  [/want(?:ing)?\s+to\s+(?:be|become|transition\s+(?:to|into)|move\s+into)\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+role\b|\s+position\b)/i, "target"],
+  // "become / move into / transition to X"
+  [/(?<![a-z])(?:become|move\s+into|transition\s+(?:to|into)|moving\s+(?:to|into)|pivot\s+(?:to|into)|switch\s+(?:to|into))\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+role\b)/i, "target"],
+  // "aiming for X"
+  [/aim(?:ing)?\s+(?:for|to\s+become)\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\s+role\b)/i, "target"],
+];
+
+const SHORT_X_TO_Y = /^([A-Za-z][A-Za-z -]{2,25}?)\s+to\s+([A-Za-z][A-Za-z -]{2,25})$/i;
+
+function extractRolesFromMessage(msg) {
+  let role = null, target = null;
+  const t = (msg || "").toLowerCase().trim();
+  const wordCount = t.split(/\s+/).length;
+
+  // bare "X to Y" only for short messages (<=6 words)
+  if (wordCount <= 6) {
+    const m = SHORT_X_TO_Y.exec(t);
+    if (m) { role = m[1].trim(); target = m[2].trim(); }
+  }
+
+  for (const [re, kind] of ROLE_RE) {
+    const m = re.exec(t);
+    if (!m) continue;
+    const g1 = m[1].trim();
+    if (kind === "both") {
+      const g2 = m[2] ? m[2].trim() : null;
+      if (!role) role = g1;
+      if (!target && g2) target = g2;
+    } else if (kind === "role" && !role) {
+      role = g1;
+    } else if (kind === "target" && !target) {
+      target = g1;
+    }
+    if (role && target) break;
+  }
+  return { role, target };
+}
+
 function resolveContext(context, message) {
   const resolved = {
     role:     context?.role   || null,
@@ -139,14 +190,11 @@ function resolveContext(context, message) {
     country:  context?.country  || null,
   };
 
-  // Try to extract from message only if not already in context
-  if (!resolved.role) {
-    const m = message.match(/from (?:a |an )?([A-Za-z][A-Za-z ]{2,30}?) (?:to|into|->)/i);
-    if (m?.[1]) resolved.role = m[1].trim();
-  }
-  if (!resolved.target) {
-    const m = message.match(/(?:to|into|become (?:a |an )?|->)\s*([A-Za-z][A-Za-z ]{2,30}?)(?:\?|$|,|\.| in | at )/i);
-    if (m?.[1]) resolved.target = m[1].trim();
+  // Only extract from message if context is missing those fields
+  if (!resolved.role || !resolved.target) {
+    const extracted = extractRolesFromMessage(message);
+    if (!resolved.role   && extracted.role)   resolved.role   = extracted.role;
+    if (!resolved.target && extracted.target) resolved.target = extracted.target;
   }
 
   return resolved;
