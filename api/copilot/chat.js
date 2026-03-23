@@ -1,25 +1,31 @@
 // ============================================================================
-// api/copilot/chat.js
-// HireEdge Backend -- EDGEX Career Intelligence Engine (v4)
+// api/copilot/chat.js  (v5)
+// HireEdge -- EDGEX Tool Routing Engine
 //
-// v4 adds: global input validation layer before any LLM call.
-// Intent-to-required-fields map gates every request.
-// Missing fields return structured clarification -- never assume roles.
+// Pipeline per request:
+//   1. Validate input + parse body
+//   2. resolveContext() -- extract roles from message
+//   3. validateRequest() -- gate for missing required fields
+//   4. detectIntent() -- classify the message
+//   5. routeTool() -- map intent to tool endpoint
+//   6. If routable: callTool() -> format with LLM
+//      If general:  LLM answers directly
+//      If unclear:  return clarification
+//
+// Every response shape:
+//   { ok: true, data: { intent, tool_used, reply, next_actions, context } }
 // ============================================================================
 
 import OpenAI from "openai";
 import { getRoleBySlug } from "../../lib/dataset/roleIndex.js";
+import { detectIntent, routeTool, callTool } from "../../lib/copilot/intentRouter.js";
 
 let openai = null;
 if (process.env.OPENAI_API_KEY) {
   openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
-// ============================================================================
-// INTENT -> REQUIRED FIELDS MAP
-// Every intent that needs specific context is listed here.
-// Add new intents as the product grows.
-// ============================================================================
+//  Intent -> required fields map 
 
 const INTENT_REQUIREMENTS = {
   career_transition: {
@@ -27,12 +33,6 @@ const INTENT_REQUIREMENTS = {
     messages: {
       current_role: "What is your current role?",
       target_role:  "What role do you want to move into?",
-    },
-  },
-  career_planning: {
-    required: ["current_role"],
-    messages: {
-      current_role: "What is your current role?",
     },
   },
   skill_gap: {
@@ -44,150 +44,95 @@ const INTENT_REQUIREMENTS = {
   },
   interview_prep: {
     required: ["target_role"],
-    messages: {
-      target_role: "Which role are you interviewing for?",
-    },
+    messages: { target_role: "Which role are you interviewing for?" },
   },
-  profile_optimisation: {
+  resume_optimise: {
     required: ["target_role"],
-    messages: {
-      target_role: "What role are you optimising your profile for?",
-    },
+    messages: { target_role: "Which role are you optimising your CV for?" },
   },
-  role_comparison: {
-    required: ["current_role", "target_role"],
-    messages: {
-      current_role: "Which role are you comparing from?",
-      target_role:  "Which role are you comparing to?",
-    },
+  linkedin_optimise: {
+    required: ["target_role"],
+    messages: { target_role: "Which role are you optimising your profile for?" },
   },
-  // These intents work without role context
-  salary_benchmark:    { required: [] },
-  visa_eligibility:    { required: [] },
-  market_intelligence: { required: [] },
-  general_career:      { required: [] },
+  salary_benchmark:  { required: [] },
+  visa_eligibility:  { required: [] },
+  general_career:    { required: [] },
+  unclear:           { required: [] },
 };
 
-// ============================================================================
-// VALIDATION MIDDLEWARE
-// Runs before every LLM call. Returns null if valid, or a clarification
-// response object if required fields are missing.
-// ============================================================================
+//  Validation gate 
 
-function validateRequest(intent, context, message) {
-  const spec = INTENT_REQUIREMENTS[intent] || INTENT_REQUIREMENTS.general_career;
-  if (!spec.required || spec.required.length === 0) return null;
+function validateRequest(intent, resolved) {
+  const spec = INTENT_REQUIREMENTS[intent] || { required: [] };
+  const missing = spec.required.filter(f =>
+    f === "current_role" ? !resolved.role : !resolved.target
+  );
+  if (missing.length === 0) return null;
 
-  // Resolve what we already know from context + message
-  const resolved = resolveContext(context, message);
-
-  const missingFields = spec.required.filter(field => {
-    if (field === "current_role") return !resolved.role;
-    if (field === "target_role")  return !resolved.target;
-    return true;
-  });
-
-  if (missingFields.length === 0) return null;
-
-  // Build clarification response
-  const actions = missingFields.map(field => ({
+  const labels  = missing.map(f => f === "current_role" ? "your current role" : "your target role");
+  const actions = missing.map(f => ({
     type:   "question",
-    label:  spec.messages[field] || ("Set " + field.replace("_", " ")),
-    prompt: spec.messages[field] || ("What is your " + field.replace("_", " ") + "?"),
+    label:  spec.messages[f],
+    prompt: spec.messages[f],
   }));
 
-  // Human-readable what's missing
-  const missingLabels = missingFields.map(f =>
-    f === "current_role" ? "your current role" : "your target role"
-  );
-
   const intentLabel = {
-    career_transition:   "a 90-day career transition plan",
-    career_planning:     "a career plan",
-    skill_gap:           "a skill gap analysis",
-    interview_prep:      "interview preparation",
-    profile_optimisation:"profile optimisation advice",
-    role_comparison:     "a role comparison",
+    career_transition: "a career transition plan",
+    skill_gap:         "a skill gap analysis",
+    resume_optimise:   "CV optimisation",
+    linkedin_optimise: "LinkedIn optimisation",
+    interview_prep:    "interview preparation",
   }[intent] || "this";
 
   return {
     ok: true,
     data: {
       type:           "clarification",
-      reply:          "To build " + intentLabel + ", I need " + missingLabels.join(" and ") + " first.",
+      reply:          "To build " + intentLabel + ", I need " + labels.join(" and ") + " first.",
       intent:         { name: intent, confidence: 0.9 },
-      missing_fields: missingFields,
+      tool_used:      null,
+      missing_fields: missing,
       next_actions:   actions,
       recommendations: [],
-      insights:       null,
-      context:        context || {},
+      context:        resolved,
     },
   };
 }
 
-// ============================================================================
-// CONTEXT RESOLVER
-// Extracts role/target from context object AND from the raw message text.
-//
-// ============================================================================
+//  Context resolver 
 
-// Role extraction patterns -- ordered by specificity
 const ROLE_RE = [
-  // "from X to/into Y"
-  [/(?<![a-zA-Z])from\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)\s+(?:to|into)\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+(?:role|as|at|in)\b)/i, "both"],
-  // "I work/worked as a X and want/need..."
+  [/(?<![a-zA-Z])from\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)\s+(?:to|into)\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+(?:role|as)\b)/i, "both"],
   [/\bi\s+(?:work|worked)\s+as\s+(?:a |an )?([a-z][a-z -]{1,24}?)\s+and\s+(?:want|need|hope|plan|look)/i, "role"],
-  // "I work as a X" end of string
-  [/\bi\s+(?:work|worked)\s+as\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,25})$/i, "role"],
-  // "I am (currently) a X"
   [/\bi\s+am\s+(?:currently\s+)?(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=\s+(?:and|looking|wanting|hoping|trying|aiming|moving|planning|who)\b|[,.]|$)/i, "role"],
-  // "currently a X"
   [/\bcurrently\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|\s+(?:and|looking|aiming)\b|$)/i, "role"],
-  // "want to be/become/transition to X"
-  [/want(?:ing)?\s+to\s+(?:be|become|transition\s+(?:to|into)|move\s+into)\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+role\b|\s+position\b)/i, "target"],
-  // "become / move into / transition to X"
-  [/(?<![a-z])(?:become|move\s+into|transition\s+(?:to|into)|moving\s+(?:to|into)|pivot\s+(?:to|into)|switch\s+(?:to|into))\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+role\b)/i, "target"],
-  // "aiming for X"
+  [/want(?:ing)?\s+to\s+(?:be|become|transition\s+(?:to|into)|move\s+into)\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+role\b)/i, "target"],
+  [/(?<![a-z])(?:become|move\s+into|transition\s+(?:to|into)|moving\s+(?:to|into))\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+role\b)/i, "target"],
   [/aim(?:ing)?\s+(?:for|to\s+become)\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\s+role\b)/i, "target"],
 ];
-
 const SHORT_X_TO_Y = /^([A-Za-z][A-Za-z -]{2,25}?)\s+to\s+([A-Za-z][A-Za-z -]{2,25})$/i;
 
-function extractRolesFromMessage(msg) {
+function extractRoles(message) {
   let role = null, target = null;
-  const t = (msg || "").toLowerCase().trim();
-  const wordCount = t.split(/\s+/).length;
-
-  // bare "X to Y" only for short messages (<=6 words)
-  if (wordCount <= 6) {
+  const t = (message || "").toLowerCase().trim();
+  if (t.split(/\s+/).length <= 6) {
     const m = SHORT_X_TO_Y.exec(t);
     if (m) { role = m[1].trim(); target = m[2].trim(); }
   }
-
   for (const [re, kind] of ROLE_RE) {
     const m = re.exec(t);
     if (!m) continue;
-    const g1 = m[1].trim();
-    if (kind === "both") {
-      const g2 = m[2] ? m[2].trim() : null;
-      if (!role) role = g1;
-      if (!target && g2) target = g2;
-    } else if (kind === "role" && !role) {
-      role = g1;
-    } else if (kind === "target" && !target) {
-      target = g1;
-    }
+    if (kind === "both") { if (!role) role = m[1].trim(); if (!target && m[2]) target = m[2].trim(); }
+    else if (kind === "role"   && !role)   role   = m[1].trim();
+    else if (kind === "target" && !target) target = m[1].trim();
     if (role && target) break;
   }
   return { role, target };
 }
 
 function resolveContext(context, message) {
-  // Always try to extract roles from the current message first
-  const extracted = extractRolesFromMessage(message);
-
+  const extracted = extractRoles(message);
   return {
-    // Message roles OVERRIDE context -- user explicitly stated new roles
     role:     extracted.role   || context?.role   || null,
     target:   extracted.target || context?.target || null,
     yearsExp: context?.yearsExp || null,
@@ -195,58 +140,18 @@ function resolveContext(context, message) {
   };
 }
 
-// ============================================================================
-// SYSTEM PROMPT
-// ============================================================================
+function safeContext(ctx) {
+  if (!ctx) return {};
+  const out = {};
+  for (const k of ["role", "target", "yearsExp", "country", "lastIntent"]) {
+    if (ctx[k] != null) out[k] = ctx[k];
+  }
+  return out;
+}
 
-const SYSTEM = `You are EDGEX -- HireEdge's Career Intelligence Engine.
+//  Career graph (inlined) 
 
-You are a McKinsey-level career strategist with access to a career knowledge graph of 1,200+ UK roles, transition data, skill requirements, and salary benchmarks.
-
-ABSOLUTE RULES:
-1. NEVER assume a role. If current_role or target_role is missing, do not generate a plan.
-2. NEVER invent or assume a role name. Ask for it instead.
-3. If required context is missing, stop and ask for it.
-4. NEVER say "Candidates transitioning typically..." -- it is generic filler.
-5. UK English spelling throughout.
-6. No filler. No hedging. No "it's important to note...".
-7. ALWAYS answer general questions (salary benchmarks, market trends, skill advice, visa routes) directly and fully -- even when a transition context is set. Context is background information, not a restriction.
-8. NEVER say "I can only provide information about your current transition" or refuse to answer a question because it doesn't match the user's stated roles. Answer what was asked.
-9. If the user states new roles mid-conversation, switch to those immediately. Never ask for confirmation.
-
-RESPONSE FORMAT for transition / career / gap questions:
-
-**TRANSITION SNAPSHOT**
-Difficulty: [X]/100 | Success Rate: [X]% | Timeline: [X]-[Y] months | Salary: GBP[X] -> GBP[Y] ([+/-]Z%)
-
-**SKILL GAP BREAKDOWN**
-Critical (0-4 weeks to signal): [list skills]
-High (1-3 months): [list skills]
-Transferable from current role: [list skills]
-
-**MARKET EXPECTATION (UK)**
-[What hiring managers screen for. What this profile signals now vs what it needs to signal. Name specific signals.]
-
-**STRATEGIC POSITIONING**
-[Exact repositioning narrative. What to lead with on CV, LinkedIn, interviews. One paragraph.]
-
-**NEXT BEST ACTION**
-[Single most important action this week. Specific. Completable. Time estimate.]
-
-For simple questions answer directly without the full structure.
-
-NEXT ACTIONS FORMAT (mandatory at end of every response):
-[ACTIONS]
-[{"type":"question","label":"Label max 5 words","prompt":"Full follow-up question"},{"type":"tool","label":"Open Gap Explainer","endpoint":"/api/tools/career-gap-explainer","prompt":""}]
-[/ACTIONS]
-
-Valid tool endpoints: /api/tools/career-gap-explainer | /api/tools/career-roadmap | /api/tools/visa-intelligence | /api/tools/interview-prep | /api/tools/resume-optimiser | /api/tools/linkedin-optimiser | /api/tools/career-pack`;
-
-// ============================================================================
-// CAREER GRAPH (inlined)
-// ============================================================================
-
-const SENIORITY_RANK = { junior:1, mid:2, senior:3, lead:4, head:5, director:6, vp:7, c_suite:8 };
+const SEN_RANK = { junior:1, mid:2, senior:3, lead:4, head:5, director:6, vp:7, c_suite:8 };
 
 function findRole(title) {
   if (!title) return null;
@@ -256,83 +161,122 @@ function findRole(title) {
   } catch { return null; }
 }
 
-function buildCareerGraphData(fromTitle, toTitle) {
-  const fromRole = findRole(fromTitle);
-  const toRole   = findRole(toTitle);
-  if (!fromRole && !toRole) return "";
-
-  const lines = ["[CAREER GRAPH DATA -- use these exact numbers in your response]"];
-
-  if (fromRole) {
-    const skills = [
-      ...(fromRole.skills_grouped?.core || []),
-      ...(fromRole.skills_grouped?.technical || []),
-    ];
+function buildCareerGraph(fromTitle, toTitle) {
+  const from = findRole(fromTitle), to = findRole(toTitle);
+  if (!from && !to) return "";
+  const lines = ["[CAREER GRAPH DATA -- use these numbers in your response]"];
+  if (from) {
+    const skills = [...(from.skills_grouped?.core||[]), ...(from.skills_grouped?.technical||[])];
+    lines.push("FROM: " + from.title, "  Salary: GBP" + (from.salary_uk?.mean?.toLocaleString("en-GB")||"n/a"), "  Skills: " + skills.slice(0,6).join(", "));
+  }
+  if (to) {
+    const skills = [...(to.skills_grouped?.core||[]), ...(to.skills_grouped?.technical||[])];
+    lines.push("TO: " + to.title, "  Salary: GBP" + (to.salary_uk?.mean?.toLocaleString("en-GB")||"n/a"), "  Demand: " + (to.demand_score||50)+"/100", "  Skills: " + skills.slice(0,6).join(", "));
+  }
+  if (from && to) {
+    const fromSet = new Set([...(from.skills_grouped?.core||[]), ...(from.skills_grouped?.technical||[])].map(s=>s.toLowerCase()));
+    const toSkills = [...(to.skills_grouped?.core||[]), ...(to.skills_grouped?.technical||[])].map(s=>s.toLowerCase());
+    const overlap = toSkills.filter(s=>fromSet.has(s));
+    const missing = toSkills.filter(s=>!fromSet.has(s));
+    const matchPct = toSkills.length ? Math.round(overlap.length/toSkills.length*100) : 50;
+    const senDelta = Math.max(0,(SEN_RANK[to.seniority]||3)-(SEN_RANK[from.seniority]||3));
+    const diff = Math.min(100,Math.round((to.difficulty_to_enter||50)*0.5+(100-matchPct)*0.35+senDelta*5));
+    const rate = Math.max(15,Math.min(90,Math.round(matchPct*0.5+(100-diff)*0.35+(from.demand_score||50)*0.15)));
+    const tMin = Math.max(2,Math.round(missing.length*0.8+senDelta*2+(to.time_to_hire||3))-2);
+    const fromSal = from.salary_uk?.mean||0, toSal = to.salary_uk?.mean||0;
+    const salD = fromSal>0&&toSal>0 ? (((toSal-fromSal)/fromSal)*100).toFixed(0) : null;
     lines.push(
-      "FROM: " + fromRole.title,
-      "  Seniority: " + (fromRole.seniority || "mid"),
-      "  UK salary mean: GBP" + (fromRole.salary_uk?.mean?.toLocaleString("en-GB") || "n/a"),
-      "  Skills: " + skills.slice(0, 8).join(", ")
+      "METRICS: Difficulty=" + diff + "/100 | Success=" + rate + "% | Timeline=" + tMin + "-" + (tMin+4) + "m",
+      salD!=null ? "  Salary: "+(salD>=0?"+":"")+salD+"% (GBP"+fromSal.toLocaleString("en-GB")+" -> GBP"+toSal.toLocaleString("en-GB")+")" : "  Salary: n/a",
+      "  Skill match: " + matchPct + "% | Missing: " + missing.slice(0,5).join(", "),
+      "  Transferable: " + overlap.slice(0,4).join(", ")
     );
   }
-
-  if (toRole) {
-    const toSkills = [
-      ...(toRole.skills_grouped?.core || []),
-      ...(toRole.skills_grouped?.technical || []),
-    ];
-    lines.push(
-      "TO: " + toRole.title,
-      "  Seniority: " + (toRole.seniority || "mid"),
-      "  UK salary mean: GBP" + (toRole.salary_uk?.mean?.toLocaleString("en-GB") || "n/a"),
-      "  Demand score: " + (toRole.demand_score || 50) + "/100",
-      "  Required skills: " + toSkills.slice(0, 8).join(", "),
-      "  Next career steps: " + (toRole.career_paths?.next_roles?.slice(0, 3).join(", ") || "none")
-    );
-  }
-
-  if (fromRole && toRole) {
-    const fromSet = new Set([
-      ...(fromRole.skills_grouped?.core || []),
-      ...(fromRole.skills_grouped?.technical || []),
-    ].map(s => s.toLowerCase()));
-
-    const toSkills = [
-      ...(toRole.skills_grouped?.core || []),
-      ...(toRole.skills_grouped?.technical || []),
-    ].map(s => s.toLowerCase());
-
-    const overlap  = toSkills.filter(s => fromSet.has(s));
-    const missing  = toSkills.filter(s => !fromSet.has(s));
-    const matchPct = toSkills.length > 0 ? Math.round((overlap.length / toSkills.length) * 100) : 50;
-    const senDelta = Math.max(0, (SENIORITY_RANK[toRole.seniority] || 3) - (SENIORITY_RANK[fromRole.seniority] || 3));
-    const diff     = Math.min(100, Math.round((toRole.difficulty_to_enter || 50) * 0.5 + (100 - matchPct) * 0.35 + senDelta * 5));
-    const rate     = Math.max(15, Math.min(90, Math.round(matchPct * 0.5 + (100 - diff) * 0.35 + (fromRole.demand_score || 50) * 0.15)));
-    const tMin     = Math.max(2, Math.round(missing.length * 0.8 + senDelta * 2 + (toRole.time_to_hire || 3)) - 2);
-    const fromSal  = fromRole.salary_uk?.mean || 0;
-    const toSal    = toRole.salary_uk?.mean   || 0;
-    const salDelta = fromSal > 0 && toSal > 0 ? (((toSal - fromSal) / fromSal) * 100).toFixed(0) : null;
-
-    lines.push(
-      "CALCULATED METRICS:",
-      "  Difficulty: " + diff + "/100",
-      "  Success rate: " + rate + "%",
-      "  Timeline: " + tMin + "-" + (tMin + 4) + " months",
-      salDelta !== null ? "  Salary: " + (salDelta >= 0 ? "+" : "") + salDelta + "% (GBP" + fromSal.toLocaleString("en-GB") + " -> GBP" + toSal.toLocaleString("en-GB") + ")" : "  Salary: data not available",
-      "  Skill match: " + matchPct + "%",
-      "  Skills to acquire: " + missing.slice(0, 6).join(", "),
-      "  Transferable: " + overlap.slice(0, 4).join(", ")
-    );
-    const altPaths = (fromRole.career_paths?.next_roles || []).filter(r => r !== toRole.title).slice(0, 3);
-    if (altPaths.length > 0) lines.push("  Alternative paths: " + altPaths.join(", "));
-  }
-
   return lines.join("\n");
 }
 
-// ============================================================================
-// HANDLER
-// ============================================================================
+//  System prompt 
+
+const SYSTEM = `You are EDGEX -- HireEdge's Career Intelligence Engine.
+
+ROLE: Format tool data into clear, structured career intelligence. You do NOT generate plans from scratch -- you format real data from tools.
+
+RULES:
+1. When tool_data is provided, format ONLY that data. Do not add invented content.
+2. NEVER invent or assume a role name.
+3. Answer general questions (salary, market, skills, visa) directly even when context has roles.
+4. If the user states new roles, use those immediately.
+5. UK English throughout. No filler. No hedging.
+6. NEVER say "I can only provide information about your current transition".
+
+FORMAT when tool_data provided:
+Use the exact numbers from tool_data. Structure with sections:
+**TRANSITION SNAPSHOT** / **SKILL GAP BREAKDOWN** / **MARKET EXPECTATION (UK)** / **STRATEGIC POSITIONING** / **NEXT BEST ACTION**
+
+FORMAT for general questions:
+Answer directly in 2-4 sentences. No structured format needed.
+
+NEXT ACTIONS (mandatory at end -- always include):
+[ACTIONS]
+[{"type":"question","label":"Short label","prompt":"Full question"},{"type":"tool","label":"Open tool","endpoint":"/api/tools/career-gap-explainer","prompt":""}]
+[/ACTIONS]`;
+
+//  LLM formatter 
+
+async function formatWithLLM(message, resolved, intent, toolData, graphData) {
+  const parts = [];
+
+  if (resolved.role || resolved.target) {
+    const ctx = [];
+    if (resolved.role)   ctx.push("Current role: " + resolved.role);
+    if (resolved.target) ctx.push("Target role: "  + resolved.target);
+    if (resolved.country) ctx.push("Country: " + resolved.country);
+    parts.push("[SESSION MEMORY]\n" + ctx.join("\n"));
+  }
+
+  if (graphData) parts.push(graphData);
+
+  if (toolData) {
+    parts.push("[TOOL DATA -- format this into your response]\n" + JSON.stringify(toolData, null, 2).slice(0, 2000));
+  }
+
+  parts.push("[USER MESSAGE]\n" + message);
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: SYSTEM },
+      { role: "user",   content: parts.join("\n\n") },
+    ],
+    temperature: 0.3,
+    max_tokens: 900,
+  });
+
+  const raw = completion.choices?.[0]?.message?.content?.trim() || "";
+  return parseActions(raw);
+}
+
+function parseActions(raw) {
+  if (!raw) return { reply: "", nextActions: [] };
+  let nextActions = [];
+  const match = raw.match(/\[ACTIONS\]([\s\S]*?)\[\/ACTIONS\]/);
+  if (match) {
+    try { nextActions = JSON.parse(match[1].trim()); } catch { nextActions = []; }
+    if (!Array.isArray(nextActions)) nextActions = [];
+  }
+  const reply = raw
+    .replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, "")
+    .replace(/\[ACTIONS\][\s\S]*/g, "")
+    .replace(/\[\/ACTIONS\]/g, "")
+    .trim();
+  return { reply, nextActions };
+}
+
+function updateCtx(resolved, intent) {
+  return { ...safeContext(resolved), lastIntent: intent };
+}
+
+//  Handler 
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -342,138 +286,85 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed." });
 
   let body;
-  try {
-    body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-  } catch {
-    return res.status(400).json({ error: "Invalid JSON." });
-  }
+  try { body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {}; }
+  catch { return res.status(400).json({ error: "Invalid JSON." }); }
 
   const { message, context } = body;
-  if (!message || typeof message !== "string" || !message.trim()) {
-    return res.status(400).json({ error: "message is required." });
-  }
+  if (!message?.trim()) return res.status(400).json({ error: "message is required." });
 
-  const intent   = detectIntent(message.trim());
-  const resolved = resolveContext(context, message.trim());
+  const msg      = message.trim();
+  const resolved = resolveContext(context, msg);
 
-  //  VALIDATION GATE: runs before any LLM call 
-  const clarification = validateRequest(intent, resolved, message.trim());
+  //  1. Detect intent 
+  const { intent, confidence, slots } = detectIntent(msg, resolved);
+  console.log("[chat] intent=" + intent + " confidence=" + confidence.toFixed(2) + " role=" + resolved.role + " target=" + resolved.target);
+
+  // Merge extracted slots into resolved
+  if (slots.role    && !resolved.role)    resolved.role    = slots.role;
+  if (slots.target  && !resolved.target)  resolved.target  = slots.target;
+  if (slots.country && !resolved.country) resolved.country = slots.country;
+
+  //  2. Validate required fields 
+  const clarification = validateRequest(intent, resolved);
   if (clarification) {
+    console.log("[chat] clarification required, missing fields:", clarification.data.missing_fields);
     return res.status(200).json(clarification);
   }
 
-  //  Proceed to AI generation 
+  //  3. Route to tool 
+  const route = routeTool(intent, { ...resolved, ...slots });
+
   try {
-    if (openai) {
-      return res.status(200).json(await aiResponse(message.trim(), resolved, intent));
+    let toolData    = null;
+    let toolUsed    = null;
+    let toolError   = null;
+
+    if (route?.canRoute) {
+      console.log("[chat] routing to tool:", route.endpoint);
+      const toolResult = await callTool(route);
+      if (toolResult.ok) {
+        toolData = toolResult.data;
+        toolUsed = route.endpoint;
+        console.log("[chat] tool succeeded:", route.endpoint);
+      } else {
+        toolError = toolResult.error;
+        console.warn("[chat] tool failed:", route.endpoint, toolResult.error);
+      }
     }
-    const { composeChatResponse } = await import("../../lib/copilot/responseComposer.js");
-    return res.status(200).json(composeChatResponse(message.trim(), context || {}));
+
+    //  4. LLM formats the response 
+    if (!openai) {
+      return res.status(200).json({
+        ok: true,
+        data: {
+          intent:      { name: intent, confidence },
+          tool_used:   toolUsed,
+          reply:       toolData ? JSON.stringify(toolData).slice(0, 300) : "EDGEX is initialising.",
+          next_actions: [],
+          context:     updateCtx(resolved, intent),
+        },
+      });
+    }
+
+    const graphData = buildCareerGraph(resolved.role, resolved.target);
+    const { reply, nextActions } = await formatWithLLM(msg, resolved, intent, toolData, graphData);
+
+    return res.status(200).json({
+      ok: true,
+      data: {
+        intent:      { name: intent, confidence },
+        tool_used:   toolUsed,
+        tool_error:  toolError || undefined,
+        reply,
+        next_actions: nextActions,
+        context:     updateCtx(resolved, intent),
+        recommendations: [],
+        insights:    null,
+      },
+    });
+
   } catch (err) {
-    console.error("[edgex/chat]", err);
+    console.error("[chat] handler error:", err);
     return res.status(500).json({ ok: false, error: "EDGEX is temporarily unavailable.", message: err.message });
   }
-}
-
-// ============================================================================
-// AI RESPONSE
-// ============================================================================
-
-async function aiResponse(message, resolved, intent) {
-  const graphData  = buildCareerGraphData(resolved.role, resolved.target);
-  const userContent = buildUserMessage(message, resolved, graphData);
-
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: SYSTEM },
-      { role: "user",   content: userContent },
-    ],
-    temperature: 0.3,
-    max_tokens:  900,
-  });
-
-  const raw = completion.choices?.[0]?.message?.content?.trim() || "";
-  const { reply, nextActions } = parseActions(raw);
-
-  return {
-    ok: true,
-    data: {
-      reply,
-      intent:          { name: intent, confidence: 0.9 },
-      insights:        null,
-      recommendations: [],
-      next_actions:    nextActions,
-      context:         updateCtx(resolved, intent),
-    },
-  };
-}
-
-// ============================================================================
-// HELPERS
-// ============================================================================
-
-function buildUserMessage(message, resolved, graphData) {
-  const parts = [];
-
-  const ctxLines = [];
-  if (resolved.role)     ctxLines.push("Current role: "        + resolved.role);
-  if (resolved.target)   ctxLines.push("Target role: "         + resolved.target);
-  if (resolved.yearsExp) ctxLines.push("Years of experience: " + resolved.yearsExp);
-  if (resolved.country)  ctxLines.push("Country: "             + resolved.country);
-  if (resolved.lastIntent) ctxLines.push("Previous topic: "    + resolved.lastIntent.replace(/_/g, " "));
-
-  if (ctxLines.length > 0) {
-    parts.push("[SESSION MEMORY -- do not ask for this again]\n" + ctxLines.join("\n"));
-  }
-  if (graphData) parts.push(graphData);
-  parts.push("[USER MESSAGE]\n" + message);
-  return parts.join("\n\n");
-}
-
-function parseActions(raw) {
-  if (!raw) return { reply: "", nextActions: [] };
-
-  let nextActions = [];
-
-  // Extract [ACTIONS]...[/ACTIONS] block
-  const match = raw.match(/\[ACTIONS\]([\s\S]*?)\[\/ACTIONS\]/);
-  if (match) {
-    try {
-      const parsed = JSON.parse(match[1].trim());
-      nextActions = Array.isArray(parsed) ? parsed : [];
-    } catch { nextActions = []; }
-  }
-
-  // Strip ALL action-related blocks from reply -- even unclosed ones
-  let reply = raw
-    .replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, "")  // closed block
-    .replace(/\[ACTIONS\][\s\S]*/g, "")                   // unclosed block (LLM forgot closing tag)
-    .replace(/\[\/ACTIONS\]/g, "")                         // orphan closing tag
-    .trim();
-
-  return { reply, nextActions };
-}
-
-function detectIntent(msg) {
-  const t = msg.toLowerCase();
-  if (/visa|immigrat|work permit|skilled worker|sponsorship/.test(t)) return "visa_eligibility";
-  if (/salary|pay|earn|compensation|wage/.test(t))                    return "salary_benchmark";
-  if (/interview|question|prepare|prep/.test(t))                      return "interview_prep";
-  if (/cv|resume|linkedin|profile/.test(t))                           return "profile_optimisation";
-  if (/skill|learn|course|gap|missing/.test(t))                       return "skill_gap";
-  if (/transition|move|switch|change|become|from.*to|into/.test(t))   return "career_transition";
-  if (/compare|vs|versus|difference/.test(t))                         return "role_comparison";
-  if (/roadmap|plan|path|90.day|30.day|next step|what should/.test(t)) return "career_planning";
-  return "general_career";
-}
-
-function updateCtx(resolved, intent) {
-  return {
-    role:       resolved.role       || null,
-    target:     resolved.target     || null,
-    yearsExp:   resolved.yearsExp   || null,
-    country:    resolved.country    || null,
-    lastIntent: intent,
-  };
 }
