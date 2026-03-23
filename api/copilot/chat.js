@@ -1,11 +1,10 @@
 // ============================================================================
 // api/copilot/chat.js
-// HireEdge Backend -- EDGEX Career Intelligence Engine (v3)
+// HireEdge Backend -- EDGEX Career Intelligence Engine (v4)
 //
-// SELF-CONTAINED -- no external lib/copilot/careerGraph.js dependency.
-// Career graph logic is inlined so this is a single-file deploy.
-//
-// Uses: lib/dataset/roleIndex.js (already exists on backend)
+// v4 adds: global input validation layer before any LLM call.
+// Intent-to-required-fields map gates every request.
+// Missing fields return structured clarification -- never assume roles.
 // ============================================================================
 
 import OpenAI from "openai";
@@ -17,25 +16,159 @@ if (process.env.OPENAI_API_KEY) {
 }
 
 // ============================================================================
+// INTENT -> REQUIRED FIELDS MAP
+// Every intent that needs specific context is listed here.
+// Add new intents as the product grows.
+// ============================================================================
+
+const INTENT_REQUIREMENTS = {
+  career_transition: {
+    required: ["current_role", "target_role"],
+    messages: {
+      current_role: "What is your current role?",
+      target_role:  "What role do you want to move into?",
+    },
+  },
+  career_planning: {
+    required: ["current_role"],
+    messages: {
+      current_role: "What is your current role?",
+    },
+  },
+  skill_gap: {
+    required: ["current_role", "target_role"],
+    messages: {
+      current_role: "What is your current role?",
+      target_role:  "What role are you aiming for?",
+    },
+  },
+  interview_prep: {
+    required: ["target_role"],
+    messages: {
+      target_role: "Which role are you interviewing for?",
+    },
+  },
+  profile_optimisation: {
+    required: ["target_role"],
+    messages: {
+      target_role: "What role are you optimising your profile for?",
+    },
+  },
+  role_comparison: {
+    required: ["current_role", "target_role"],
+    messages: {
+      current_role: "Which role are you comparing from?",
+      target_role:  "Which role are you comparing to?",
+    },
+  },
+  // These intents work without role context
+  salary_benchmark:    { required: [] },
+  visa_eligibility:    { required: [] },
+  market_intelligence: { required: [] },
+  general_career:      { required: [] },
+};
+
+// ============================================================================
+// VALIDATION MIDDLEWARE
+// Runs before every LLM call. Returns null if valid, or a clarification
+// response object if required fields are missing.
+// ============================================================================
+
+function validateRequest(intent, context, message) {
+  const spec = INTENT_REQUIREMENTS[intent] || INTENT_REQUIREMENTS.general_career;
+  if (!spec.required || spec.required.length === 0) return null;
+
+  // Resolve what we already know from context + message
+  const resolved = resolveContext(context, message);
+
+  const missingFields = spec.required.filter(field => {
+    if (field === "current_role") return !resolved.role;
+    if (field === "target_role")  return !resolved.target;
+    return true;
+  });
+
+  if (missingFields.length === 0) return null;
+
+  // Build clarification response
+  const actions = missingFields.map(field => ({
+    type:   "question",
+    label:  spec.messages[field] || ("Set " + field.replace("_", " ")),
+    prompt: spec.messages[field] || ("What is your " + field.replace("_", " ") + "?"),
+  }));
+
+  // Human-readable what's missing
+  const missingLabels = missingFields.map(f =>
+    f === "current_role" ? "your current role" : "your target role"
+  );
+
+  const intentLabel = {
+    career_transition:   "a 90-day career transition plan",
+    career_planning:     "a career plan",
+    skill_gap:           "a skill gap analysis",
+    interview_prep:      "interview preparation",
+    profile_optimisation:"profile optimisation advice",
+    role_comparison:     "a role comparison",
+  }[intent] || "this";
+
+  return {
+    ok: true,
+    data: {
+      type:           "clarification",
+      reply:          "To build " + intentLabel + ", I need " + missingLabels.join(" and ") + " first.",
+      intent:         { name: intent, confidence: 0.9 },
+      missing_fields: missingFields,
+      next_actions:   actions,
+      recommendations: [],
+      insights:       null,
+      context:        context || {},
+    },
+  };
+}
+
+// ============================================================================
+// CONTEXT RESOLVER
+// Extracts role/target from context object AND from the raw message text.
+//
+// ============================================================================
+
+function resolveContext(context, message) {
+  const resolved = {
+    role:     context?.role   || null,
+    target:   context?.target || null,
+    yearsExp: context?.yearsExp || null,
+    country:  context?.country  || null,
+  };
+
+  // Try to extract from message only if not already in context
+  if (!resolved.role) {
+    const m = message.match(/from (?:a |an )?([A-Za-z][A-Za-z ]{2,30}?) (?:to|into|->)/i);
+    if (m?.[1]) resolved.role = m[1].trim();
+  }
+  if (!resolved.target) {
+    const m = message.match(/(?:to|into|become (?:a |an )?|->)\s*([A-Za-z][A-Za-z ]{2,30}?)(?:\?|$|,|\.| in | at )/i);
+    if (m?.[1]) resolved.target = m[1].trim();
+  }
+
+  return resolved;
+}
+
+// ============================================================================
 // SYSTEM PROMPT
 // ============================================================================
 
 const SYSTEM = `You are EDGEX -- HireEdge's Career Intelligence Engine.
 
-You are a McKinsey-level career strategist with access to a live career knowledge graph covering 1,200+ UK roles, transition data, skill requirements, and salary benchmarks. You give precise, data-driven intelligence -- not generic advice.
+You are a McKinsey-level career strategist with access to a career knowledge graph of 1,200+ UK roles, transition data, skill requirements, and salary benchmarks.
 
-WHAT YOU ARE NOT:
-- Not a chatbot
-- Not a coach who says "great question!"
-- Not an AI that hedges with "it depends"
-- Never start a sentence with "Candidates transitioning typically..." -- that is generic filler
+ABSOLUTE RULES:
+1. NEVER assume a role. If current_role or target_role is missing, do not generate a plan.
+2. NEVER invent or assume a role name. Ask for it instead.
+3. If required context is missing, stop and ask for it.
+4. NEVER say "Candidates transitioning typically..." -- it is generic filler.
+5. UK English spelling throughout.
+6. No filler. No hedging. No "it's important to note...".
 
-WHAT YOU ARE:
-- A decision engine that gives specific numbers
-- A strategist who knows exactly what hiring managers look for
-- A system that uses real role data, skills data, and salary data
-
-MANDATORY RESPONSE FORMAT for transition / career / gap questions:
+RESPONSE FORMAT for transition / career / gap questions:
 
 **TRANSITION SNAPSHOT**
 Difficulty: [X]/100 | Success Rate: [X]% | Timeline: [X]-[Y] months | Salary: GBP[X] -> GBP[Y] ([+/-]Z%)
@@ -46,97 +179,66 @@ High (1-3 months): [list skills]
 Transferable from current role: [list skills]
 
 **MARKET EXPECTATION (UK)**
-[What hiring managers screen for in the first 30 seconds. What this profile signals right now vs what it needs to signal. Name the specific signals.]
+[What hiring managers screen for. What this profile signals now vs what it needs to signal. Name specific signals.]
 
 **STRATEGIC POSITIONING**
-[The exact repositioning narrative. What to lead with on CV, LinkedIn, and in interviews. What to de-emphasise. One paragraph, no bullet points.]
+[Exact repositioning narrative. What to lead with on CV, LinkedIn, interviews. One paragraph.]
 
 **NEXT BEST ACTION**
-[Single most important thing to do this week. Specific. Completable. With time estimate.]
+[Single most important action this week. Specific. Completable. Time estimate.]
 
-RULES:
-1. ALWAYS use the metrics from [CAREER GRAPH DATA] when provided. Do not invent numbers.
-2. For salary: always use GBP and real UK figures.
-3. Section headers must be bold (**LIKE THIS**).
-4. For simple factual questions (what does X role do, what salary does Y earn), answer directly without the full structure.
-5. Never repeat yourself across sections.
-6. UK English spelling throughout.
-7. No filler. No hedging. No "it's important to note...".
-8. If context (current role, target) is already known, use it -- do not ask for it again.
-9. When conversation has depth, add ONE Career Pack nudge: "Career Pack turns this into a full 30/60/90 transition report with CV, LinkedIn, and interview strategy."
+For simple questions answer directly without the full structure.
 
 NEXT ACTIONS FORMAT (mandatory at end of every response):
 [ACTIONS]
 [{"type":"question","label":"Label max 5 words","prompt":"Full follow-up question"},{"type":"tool","label":"Open Gap Explainer","endpoint":"/api/tools/career-gap-explainer","prompt":""}]
 [/ACTIONS]
 
-Use 2-3 actions. Always include at least one tool action when a transition is discussed.
-Valid endpoints: /api/tools/career-gap-explainer | /api/tools/career-roadmap | /api/tools/visa-intelligence | /api/tools/interview-prep | /api/tools/resume-optimiser | /api/tools/linkedin-optimiser`;
+Valid tool endpoints: /api/tools/career-gap-explainer | /api/tools/career-roadmap | /api/tools/visa-intelligence | /api/tools/interview-prep | /api/tools/resume-optimiser | /api/tools/linkedin-optimiser | /api/tools/career-pack`;
 
 // ============================================================================
-// Career graph -- inlined (no external dependency)
+// CAREER GRAPH (inlined)
 // ============================================================================
 
-const SENIORITY_RANK = {
-  junior: 1, mid: 2, senior: 3, lead: 4,
-  head: 5, director: 6, vp: 7, c_suite: 8
-};
-
-function slugify(title) {
-  return (title || "").toLowerCase().trim().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-}
+const SENIORITY_RANK = { junior:1, mid:2, senior:3, lead:4, head:5, director:6, vp:7, c_suite:8 };
 
 function findRole(title) {
   if (!title) return null;
   try {
-    const bySlug = getRoleBySlug(slugify(title));
-    if (bySlug) return bySlug;
-    // Also try common variations
-    const variations = [
-      slugify(title),
-      slugify(title.replace(" Manager", "-manager")),
-      slugify(title.replace("Manager", "manager")),
-    ];
-    for (const slug of variations) {
-      const r = getRoleBySlug(slug);
-      if (r) return r;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+    const slug = title.toLowerCase().trim().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+    return getRoleBySlug(slug) || null;
+  } catch { return null; }
 }
 
 function buildCareerGraphData(fromTitle, toTitle) {
   const fromRole = findRole(fromTitle);
   const toRole   = findRole(toTitle);
-
   if (!fromRole && !toRole) return "";
 
   const lines = ["[CAREER GRAPH DATA -- use these exact numbers in your response]"];
 
   if (fromRole) {
     const skills = [
-      ...(fromRole.skills_grouped?.core      || []),
+      ...(fromRole.skills_grouped?.core || []),
       ...(fromRole.skills_grouped?.technical || []),
     ];
     lines.push(
-      "FROM ROLE: " + fromRole.title,
+      "FROM: " + fromRole.title,
       "  Seniority: " + (fromRole.seniority || "mid"),
-      "  UK salary mean: GBP" + (fromRole.salary_uk?.mean?.toLocaleString("en-GB") || "unknown"),
+      "  UK salary mean: GBP" + (fromRole.salary_uk?.mean?.toLocaleString("en-GB") || "n/a"),
       "  Skills: " + skills.slice(0, 8).join(", ")
     );
   }
 
   if (toRole) {
     const toSkills = [
-      ...(toRole.skills_grouped?.core      || []),
+      ...(toRole.skills_grouped?.core || []),
       ...(toRole.skills_grouped?.technical || []),
     ];
     lines.push(
-      "TO ROLE: " + toRole.title,
+      "TO: " + toRole.title,
       "  Seniority: " + (toRole.seniority || "mid"),
-      "  UK salary mean: GBP" + (toRole.salary_uk?.mean?.toLocaleString("en-GB") || "unknown"),
+      "  UK salary mean: GBP" + (toRole.salary_uk?.mean?.toLocaleString("en-GB") || "n/a"),
       "  Demand score: " + (toRole.demand_score || 50) + "/100",
       "  Required skills: " + toSkills.slice(0, 8).join(", "),
       "  Next career steps: " + (toRole.career_paths?.next_roles?.slice(0, 3).join(", ") || "none")
@@ -144,83 +246,46 @@ function buildCareerGraphData(fromTitle, toTitle) {
   }
 
   if (fromRole && toRole) {
-    const fromSkillSet = new Set([
-      ...(fromRole.skills_grouped?.core      || []),
+    const fromSet = new Set([
+      ...(fromRole.skills_grouped?.core || []),
       ...(fromRole.skills_grouped?.technical || []),
     ].map(s => s.toLowerCase()));
 
     const toSkills = [
-      ...(toRole.skills_grouped?.core      || []),
+      ...(toRole.skills_grouped?.core || []),
       ...(toRole.skills_grouped?.technical || []),
     ].map(s => s.toLowerCase());
 
-    const overlap  = toSkills.filter(s => fromSkillSet.has(s));
-    const missing  = toSkills.filter(s => !fromSkillSet.has(s));
-
-    const matchPct = toSkills.length > 0
-      ? Math.round((overlap.length / toSkills.length) * 100) : 50;
-
-    const fromRank = SENIORITY_RANK[fromRole.seniority] || 3;
-    const toRank   = SENIORITY_RANK[toRole.seniority]   || 3;
-    const senDelta = Math.max(0, toRank - fromRank);
-
-    const difficulty = Math.min(100, Math.round(
-      (toRole.difficulty_to_enter || 50) * 0.5 +
-      (100 - matchPct) * 0.35 +
-      senDelta * 5
-    ));
-
-    const successRate = Math.max(15, Math.min(90, Math.round(
-      matchPct * 0.5 + (100 - difficulty) * 0.35 + (fromRole.demand_score || 50) * 0.15
-    )));
-
-    const baseTime  = toRole.time_to_hire || 3;
-    const timeMin   = Math.max(2, Math.round(missing.length * 0.8 + senDelta * 2 + baseTime) - 2);
-    const timeMax   = timeMin + 4;
-
-    const fromSal = fromRole.salary_uk?.mean || 0;
-    const toSal   = toRole.salary_uk?.mean   || 0;
-    const salDelta = fromSal > 0 && toSal > 0
-      ? (((toSal - fromSal) / fromSal) * 100).toFixed(0) : null;
+    const overlap  = toSkills.filter(s => fromSet.has(s));
+    const missing  = toSkills.filter(s => !fromSet.has(s));
+    const matchPct = toSkills.length > 0 ? Math.round((overlap.length / toSkills.length) * 100) : 50;
+    const senDelta = Math.max(0, (SENIORITY_RANK[toRole.seniority] || 3) - (SENIORITY_RANK[fromRole.seniority] || 3));
+    const diff     = Math.min(100, Math.round((toRole.difficulty_to_enter || 50) * 0.5 + (100 - matchPct) * 0.35 + senDelta * 5));
+    const rate     = Math.max(15, Math.min(90, Math.round(matchPct * 0.5 + (100 - diff) * 0.35 + (fromRole.demand_score || 50) * 0.15)));
+    const tMin     = Math.max(2, Math.round(missing.length * 0.8 + senDelta * 2 + (toRole.time_to_hire || 3)) - 2);
+    const fromSal  = fromRole.salary_uk?.mean || 0;
+    const toSal    = toRole.salary_uk?.mean   || 0;
+    const salDelta = fromSal > 0 && toSal > 0 ? (((toSal - fromSal) / fromSal) * 100).toFixed(0) : null;
 
     lines.push(
-      "CALCULATED TRANSITION METRICS:",
-      "  Difficulty score: " + difficulty + "/100",
-      "  Success rate: " + successRate + "%",
-      "  Timeline: " + timeMin + "-" + timeMax + " months",
-      salDelta !== null
-        ? "  Salary change: " + (salDelta >= 0 ? "+" : "") + salDelta + "% (GBP" + fromSal.toLocaleString("en-GB") + " -> GBP" + toSal.toLocaleString("en-GB") + ")"
-        : "  Salary data: not available",
+      "CALCULATED METRICS:",
+      "  Difficulty: " + diff + "/100",
+      "  Success rate: " + rate + "%",
+      "  Timeline: " + tMin + "-" + (tMin + 4) + " months",
+      salDelta !== null ? "  Salary: " + (salDelta >= 0 ? "+" : "") + salDelta + "% (GBP" + fromSal.toLocaleString("en-GB") + " -> GBP" + toSal.toLocaleString("en-GB") + ")" : "  Salary: data not available",
       "  Skill match: " + matchPct + "%",
       "  Skills to acquire: " + missing.slice(0, 6).join(", "),
-      "  Transferable skills: " + overlap.slice(0, 4).join(", ")
+      "  Transferable: " + overlap.slice(0, 4).join(", ")
     );
-
-    if (fromRole.career_paths?.next_roles?.length > 0) {
-      const altPaths = fromRole.career_paths.next_roles
-        .filter(r => r !== toRole.title)
-        .slice(0, 3);
-      if (altPaths.length > 0) {
-        lines.push("  Alternative paths from current role: " + altPaths.join(", "));
-      }
-    }
+    const altPaths = (fromRole.career_paths?.next_roles || []).filter(r => r !== toRole.title).slice(0, 3);
+    if (altPaths.length > 0) lines.push("  Alternative paths: " + altPaths.join(", "));
   }
 
   return lines.join("\n");
 }
 
-function extractRole(message, direction) {
-  if (!message) return null;
-  if (direction === "from") {
-    const m = message.match(/from (?:a |an )?([A-Za-z ]+?) (?:to|into|->)/i);
-    return m?.[1]?.trim() || null;
-  }
-  const m = message.match(/(?:to|into|become (?:a |an )?|->)\s*([A-Za-z ]+?)(?:\?|$|,|\.| in | at )/i);
-  return m?.[1]?.trim() || null;
-}
-
 // ============================================================================
-// Handler
+// HANDLER
 // ============================================================================
 
 export default async function handler(req, res) {
@@ -242,38 +307,35 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "message is required." });
   }
 
+  const intent   = detectIntent(message.trim());
+  const resolved = resolveContext(context, message.trim());
+
+  //  VALIDATION GATE: runs before any LLM call 
+  const clarification = validateRequest(intent, resolved, message.trim());
+  if (clarification) {
+    return res.status(200).json(clarification);
+  }
+
+  //  Proceed to AI generation 
   try {
     if (openai) {
-      return res.status(200).json(await aiResponse(message.trim(), context || {}));
+      return res.status(200).json(await aiResponse(message.trim(), resolved, intent));
     }
-    // Fallback: keyword engine
     const { composeChatResponse } = await import("../../lib/copilot/responseComposer.js");
     return res.status(200).json(composeChatResponse(message.trim(), context || {}));
   } catch (err) {
     console.error("[edgex/chat]", err);
-    return res.status(500).json({
-      ok: false,
-      error: "EDGEX is temporarily unavailable.",
-      message: err.message,
-    });
+    return res.status(500).json({ ok: false, error: "EDGEX is temporarily unavailable.", message: err.message });
   }
 }
 
 // ============================================================================
-// AI response
+// AI RESPONSE
 // ============================================================================
 
-async function aiResponse(message, context) {
-  const intent = detectIntent(message);
-
-  // Resolve role titles from context or message
-  const fromTitle = context?.role   || extractRole(message, "from");
-  const toTitle   = context?.target || extractRole(message, "to");
-
-  // Inject career graph data from dataset
-  const graphData = buildCareerGraphData(fromTitle, toTitle);
-
-  const userContent = buildUserMessage(message, context, graphData);
+async function aiResponse(message, resolved, intent) {
+  const graphData  = buildCareerGraphData(resolved.role, resolved.target);
+  const userContent = buildUserMessage(message, resolved, graphData);
 
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -286,45 +348,39 @@ async function aiResponse(message, context) {
   });
 
   const raw = completion.choices?.[0]?.message?.content?.trim() || "";
-
-  // Strip [ACTIONS] before sending to frontend
   const { reply, nextActions } = parseActions(raw);
 
   return {
     ok: true,
     data: {
       reply,
-      intent: { name: intent, confidence: 0.9 },
-      insights: null,
+      intent:          { name: intent, confidence: 0.9 },
+      insights:        null,
       recommendations: [],
-      next_actions: nextActions,
-      context: updateCtx(context, message, intent, fromTitle, toTitle),
+      next_actions:    nextActions,
+      context:         updateCtx(resolved, intent),
     },
   };
 }
 
 // ============================================================================
-// Helpers
+// HELPERS
 // ============================================================================
 
-function buildUserMessage(message, context, graphData) {
+function buildUserMessage(message, resolved, graphData) {
   const parts = [];
 
   const ctxLines = [];
-  if (context?.role)       ctxLines.push("Current role: " + context.role);
-  if (context?.target)     ctxLines.push("Target role: "  + context.target);
-  if (context?.yearsExp)   ctxLines.push("Years of experience: " + context.yearsExp);
-  if (context?.country)    ctxLines.push("Country: " + context.country);
-  if (context?.lastIntent) ctxLines.push("Previous topic: " + context.lastIntent.replace(/_/g, " "));
+  if (resolved.role)     ctxLines.push("Current role: "        + resolved.role);
+  if (resolved.target)   ctxLines.push("Target role: "         + resolved.target);
+  if (resolved.yearsExp) ctxLines.push("Years of experience: " + resolved.yearsExp);
+  if (resolved.country)  ctxLines.push("Country: "             + resolved.country);
+  if (resolved.lastIntent) ctxLines.push("Previous topic: "    + resolved.lastIntent.replace(/_/g, " "));
 
   if (ctxLines.length > 0) {
     parts.push("[SESSION MEMORY -- do not ask for this again]\n" + ctxLines.join("\n"));
   }
-
-  if (graphData) {
-    parts.push(graphData);
-  }
-
+  if (graphData) parts.push(graphData);
   parts.push("[USER MESSAGE]\n" + message);
   return parts.join("\n\n");
 }
@@ -350,14 +406,16 @@ function detectIntent(msg) {
   if (/skill|learn|course|gap|missing/.test(t))                       return "skill_gap";
   if (/transition|move|switch|change|become|from.*to|into/.test(t))   return "career_transition";
   if (/compare|vs|versus|difference/.test(t))                         return "role_comparison";
-  if (/roadmap|plan|path|next step|what should/.test(t))              return "career_planning";
+  if (/roadmap|plan|path|90.day|30.day|next step|what should/.test(t)) return "career_planning";
   return "general_career";
 }
 
-function updateCtx(existing, message, intent, fromTitle, toTitle) {
-  const ctx = { ...existing };
-  if (!ctx.role   && fromTitle) ctx.role   = fromTitle;
-  if (!ctx.target && toTitle)   ctx.target = toTitle;
-  ctx.lastIntent = intent;
-  return ctx;
+function updateCtx(resolved, intent) {
+  return {
+    role:       resolved.role       || null,
+    target:     resolved.target     || null,
+    yearsExp:   resolved.yearsExp   || null,
+    country:    resolved.country    || null,
+    lastIntent: intent,
+  };
 }
