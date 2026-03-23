@@ -429,14 +429,26 @@ function buildUserMessage(message, resolved, graphData) {
 }
 
 function parseActions(raw) {
-  const match = raw.match(/\[ACTIONS\]([\s\S]*?)\[\/ACTIONS\]/);
-  if (!match) return { reply: raw.trim(), nextActions: [] };
+  if (!raw) return { reply: "", nextActions: [] };
+
   let nextActions = [];
-  try {
-    const parsed = JSON.parse(match[1].trim());
-    nextActions = Array.isArray(parsed) ? parsed : [];
-  } catch { nextActions = []; }
-  const reply = raw.replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, "").trim();
+
+  // Extract [ACTIONS]...[/ACTIONS] block
+  const match = raw.match(/\[ACTIONS\]([\s\S]*?)\[\/ACTIONS\]/);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      nextActions = Array.isArray(parsed) ? parsed : [];
+    } catch { nextActions = []; }
+  }
+
+  // Strip ALL action-related blocks from reply -- even unclosed ones
+  let reply = raw
+    .replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, "")  // closed block
+    .replace(/\[ACTIONS\][\s\S]*/g, "")                   // unclosed block (LLM forgot closing tag)
+    .replace(/\[\/ACTIONS\]/g, "")                         // orphan closing tag
+    .trim();
+
   return { reply, nextActions };
 }
 
