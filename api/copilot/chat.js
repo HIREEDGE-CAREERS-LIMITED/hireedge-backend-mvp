@@ -1,5 +1,5 @@
 // ============================================================================
-// api/copilot/chat.js  (v5)
+// api/copilot/chat.js  (v6 — EDGEX Final)
 // HireEdge -- EDGEX Tool Routing Engine
 //
 // Pipeline per request:
@@ -11,6 +11,11 @@
 //   6. If routable: callTool() -> format with LLM
 //      If general:  LLM answers directly
 //      If unclear:  return clarification
+//
+// v6 additions over v5:
+//   • intelligence_mode  — injects structured output template into system prompt
+//   • documentText       — injects extracted document content into LLM context
+//   • fileName/fileType  — used for document context labelling
 //
 // Every response shape:
 //   { ok: true, data: { intent, tool_used, reply, next_actions, context } }
@@ -25,7 +30,69 @@ if (process.env.OPENAI_API_KEY) {
   openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
-//  Intent -> required fields map 
+// ─── Intelligence mode prompts ─────────────────────────────────────────────────
+
+const INTELLIGENCE_MODE_PROMPTS = {
+  salary: `
+FORMAT (Salary Intelligence mode — use these exact section headers):
+**SUMMARY**
+One sentence: the key salary finding.
+
+**KEY INSIGHT**
+The most important salary figure with specific UK pound amounts.
+
+**GAP / OPPORTUNITY**
+What salary range the user should target and why.
+
+**NEXT STEP**
+The single most important action to improve earning potential.
+
+Use real UK salary figures. Be specific with pound amounts and percentages.`,
+
+  transition: `
+FORMAT (Transition Analysis mode — use these exact section headers):
+**SUMMARY**
+One sentence: transition feasibility.
+
+**KEY INSIGHT**
+Difficulty score (out of 100) and realistic timeline in months.
+
+**GAP / OPPORTUNITY**
+The 2-3 most critical gaps that determine success or failure.
+
+**NEXT STEP**
+The single highest-leverage action to accelerate this transition.`,
+
+  skills: `
+FORMAT (Skills Gap mode — use these exact section headers):
+**SUMMARY**
+One sentence: overall readiness level as a percentage or score.
+
+**KEY INSIGHT**
+The single most critical skill gap and why it matters most.
+
+**GAP / OPPORTUNITY**
+List specific missing skills rated by importance: Critical / Important / Nice to have.
+
+**NEXT STEP**
+The fastest way to close the most important gap.`,
+
+  path: `
+FORMAT (Career Path mode — use these exact section headers):
+**SUMMARY**
+One sentence: the best route to the target role.
+
+**KEY INSIGHT**
+Direct path vs recommended stepping-stone path with timelines.
+
+**GAP / OPPORTUNITY**
+Alternative routes and which has the best risk/reward ratio.
+
+**NEXT STEP**
+The first concrete move to take this week.`,
+};
+
+// ─── Intent -> required fields map ────────────────────────────────────────────
 
 const INTENT_REQUIREMENTS = {
   career_transition: {
@@ -60,10 +127,10 @@ const INTENT_REQUIREMENTS = {
   unclear:           { required: [] },
 };
 
-//  Validation gate 
+// ─── Validation gate ──────────────────────────────────────────────────────────
 
 function validateRequest(intent, resolved) {
-  const spec = INTENT_REQUIREMENTS[intent] || { required: [] };
+  const spec    = INTENT_REQUIREMENTS[intent] || { required: [] };
   const missing = spec.required.filter(f =>
     f === "current_role" ? !resolved.role : !resolved.target
   );
@@ -87,19 +154,19 @@ function validateRequest(intent, resolved) {
   return {
     ok: true,
     data: {
-      type:           "clarification",
-      reply:          "To build " + intentLabel + ", I need " + labels.join(" and ") + " first.",
-      intent:         { name: intent, confidence: 0.9 },
-      tool_used:      null,
-      missing_fields: missing,
-      next_actions:   actions,
+      type:            "clarification",
+      reply:           "To build " + intentLabel + ", I need " + labels.join(" and ") + " first.",
+      intent:          { name: intent, confidence: 0.9 },
+      tool_used:       null,
+      missing_fields:  missing,
+      next_actions:    actions,
       recommendations: [],
-      context:        resolved,
+      context:         resolved,
     },
   };
 }
 
-//  Context resolver 
+// ─── Context resolver ─────────────────────────────────────────────────────────
 
 const ROLE_RE = [
   [/(?<![a-zA-Z])from\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)\s+(?:to|into)\s+(?:a |an )?([A-Za-z][A-Za-z -]{2,28}?)(?=[,.]|$|\?|\s+(?:role|as)\b)/i, "both"],
@@ -122,7 +189,7 @@ function extractRoles(message) {
   for (const [re, kind] of ROLE_RE) {
     const m = re.exec(t);
     if (!m) continue;
-    if (kind === "both") { if (!role) role = m[1].trim(); if (!target && m[2]) target = m[2].trim(); }
+    if (kind === "both")            { if (!role) role = m[1].trim(); if (!target && m[2]) target = m[2].trim(); }
     else if (kind === "role"   && !role)   role   = m[1].trim();
     else if (kind === "target" && !target) target = m[1].trim();
     if (role && target) break;
@@ -149,7 +216,7 @@ function safeContext(ctx) {
   return out;
 }
 
-//  Career graph (inlined) 
+// ─── Career graph ─────────────────────────────────────────────────────────────
 
 const SEN_RANK = { junior:1, mid:2, senior:3, lead:4, head:5, director:6, vp:7, c_suite:8 };
 
@@ -167,24 +234,33 @@ function buildCareerGraph(fromTitle, toTitle) {
   const lines = ["[CAREER GRAPH DATA -- use these numbers in your response]"];
   if (from) {
     const skills = [...(from.skills_grouped?.core||[]), ...(from.skills_grouped?.technical||[])];
-    lines.push("FROM: " + from.title, "  Salary: GBP" + (from.salary_uk?.mean?.toLocaleString("en-GB")||"n/a"), "  Skills: " + skills.slice(0,6).join(", "));
+    lines.push(
+      "FROM: " + from.title,
+      "  Salary: GBP" + (from.salary_uk?.mean?.toLocaleString("en-GB")||"n/a"),
+      "  Skills: " + skills.slice(0,6).join(", ")
+    );
   }
   if (to) {
     const skills = [...(to.skills_grouped?.core||[]), ...(to.skills_grouped?.technical||[])];
-    lines.push("TO: " + to.title, "  Salary: GBP" + (to.salary_uk?.mean?.toLocaleString("en-GB")||"n/a"), "  Demand: " + (to.demand_score||50)+"/100", "  Skills: " + skills.slice(0,6).join(", "));
+    lines.push(
+      "TO: " + to.title,
+      "  Salary: GBP" + (to.salary_uk?.mean?.toLocaleString("en-GB")||"n/a"),
+      "  Demand: " + (to.demand_score||50)+"/100",
+      "  Skills: " + skills.slice(0,6).join(", ")
+    );
   }
   if (from && to) {
-    const fromSet = new Set([...(from.skills_grouped?.core||[]), ...(from.skills_grouped?.technical||[])].map(s=>s.toLowerCase()));
+    const fromSet  = new Set([...(from.skills_grouped?.core||[]), ...(from.skills_grouped?.technical||[])].map(s=>s.toLowerCase()));
     const toSkills = [...(to.skills_grouped?.core||[]), ...(to.skills_grouped?.technical||[])].map(s=>s.toLowerCase());
-    const overlap = toSkills.filter(s=>fromSet.has(s));
-    const missing = toSkills.filter(s=>!fromSet.has(s));
+    const overlap  = toSkills.filter(s=>fromSet.has(s));
+    const missing  = toSkills.filter(s=>!fromSet.has(s));
     const matchPct = toSkills.length ? Math.round(overlap.length/toSkills.length*100) : 50;
     const senDelta = Math.max(0,(SEN_RANK[to.seniority]||3)-(SEN_RANK[from.seniority]||3));
-    const diff = Math.min(100,Math.round((to.difficulty_to_enter||50)*0.5+(100-matchPct)*0.35+senDelta*5));
-    const rate = Math.max(15,Math.min(90,Math.round(matchPct*0.5+(100-diff)*0.35+(from.demand_score||50)*0.15)));
-    const tMin = Math.max(2,Math.round(missing.length*0.8+senDelta*2+(to.time_to_hire||3))-2);
-    const fromSal = from.salary_uk?.mean||0, toSal = to.salary_uk?.mean||0;
-    const salD = fromSal>0&&toSal>0 ? (((toSal-fromSal)/fromSal)*100).toFixed(0) : null;
+    const diff     = Math.min(100,Math.round((to.difficulty_to_enter||50)*0.5+(100-matchPct)*0.35+senDelta*5));
+    const rate     = Math.max(15,Math.min(90,Math.round(matchPct*0.5+(100-diff)*0.35+(from.demand_score||50)*0.15)));
+    const tMin     = Math.max(2,Math.round(missing.length*0.8+senDelta*2+(to.time_to_hire||3))-2);
+    const fromSal  = from.salary_uk?.mean||0, toSal = to.salary_uk?.mean||0;
+    const salD     = fromSal>0&&toSal>0 ? (((toSal-fromSal)/fromSal)*100).toFixed(0) : null;
     lines.push(
       "METRICS: Difficulty=" + diff + "/100 | Success=" + rate + "% | Timeline=" + tMin + "-" + (tMin+4) + "m",
       salD!=null ? "  Salary: "+(salD>=0?"+":"")+salD+"% (GBP"+fromSal.toLocaleString("en-GB")+" -> GBP"+toSal.toLocaleString("en-GB")+")" : "  Salary: n/a",
@@ -195,9 +271,26 @@ function buildCareerGraph(fromTitle, toTitle) {
   return lines.join("\n");
 }
 
-//  System prompt 
+// ─── Document context builder ─────────────────────────────────────────────────
 
-const SYSTEM = `You are EDGEX -- HireEdge's Career Intelligence Engine.
+function buildDocumentContext(fileType, fileName, documentText) {
+  if (!documentText) return "";
+  const TYPE_LABELS = { cv:"CV / Resume", jd:"Job Description", cover:"Cover Letter", document:"Document" };
+  const label = TYPE_LABELS[fileType] || "Document";
+  return [
+    "[UPLOADED DOCUMENT -- " + label + (fileName ? ' "' + fileName + '"' : "") + "]",
+    "The user has uploaded this document. Base your response on its actual content.",
+    "Reference specific details, skills, experience, or requirements found in it.",
+    "Do not assume content that is not present.",
+    "",
+    documentText.slice(0, 10000),
+    "[END DOCUMENT]",
+  ].join("\n");
+}
+
+// ─── System prompt ────────────────────────────────────────────────────────────
+
+const BASE_SYSTEM = `You are EDGEX -- HireEdge's Career Intelligence Engine.
 
 ROLE: Format tool data into clear, structured career intelligence. You do NOT generate plans from scratch -- you format real data from tools.
 
@@ -208,6 +301,7 @@ RULES:
 4. If the user states new roles, use those immediately.
 5. UK English throughout. No filler. No hedging.
 6. NEVER say "I can only provide information about your current transition".
+7. When a document is provided, reference its actual content specifically.
 
 FORMAT when tool_data provided:
 Use the exact numbers from tool_data. Structure with sections:
@@ -221,17 +315,28 @@ NEXT ACTIONS (mandatory at end -- always include):
 [{"type":"question","label":"Short label","prompt":"Full question"},{"type":"tool","label":"Open tool","endpoint":"/api/tools/career-gap-explainer","prompt":""}]
 [/ACTIONS]`;
 
-//  LLM formatter 
+function buildSystemPrompt(intelligenceMode) {
+  if (!intelligenceMode) return BASE_SYSTEM;
+  const modePrompt = INTELLIGENCE_MODE_PROMPTS[intelligenceMode];
+  if (!modePrompt) return BASE_SYSTEM;
+  return BASE_SYSTEM + "\n\n" + modePrompt;
+}
 
-async function formatWithLLM(message, resolved, intent, toolData, graphData) {
+// ─── LLM formatter ────────────────────────────────────────────────────────────
+
+async function formatWithLLM(message, resolved, intent, toolData, graphData, intelligenceMode, documentContext) {
   const parts = [];
 
   if (resolved.role || resolved.target) {
     const ctx = [];
-    if (resolved.role)   ctx.push("Current role: " + resolved.role);
-    if (resolved.target) ctx.push("Target role: "  + resolved.target);
-    if (resolved.country) ctx.push("Country: " + resolved.country);
+    if (resolved.role)    ctx.push("Current role: " + resolved.role);
+    if (resolved.target)  ctx.push("Target role: "  + resolved.target);
+    if (resolved.country) ctx.push("Country: "      + resolved.country);
     parts.push("[SESSION MEMORY]\n" + ctx.join("\n"));
+  }
+
+  if (intelligenceMode) {
+    parts.push("[INTELLIGENCE MODE: " + intelligenceMode.toUpperCase() + "]\nUse the structured FORMAT for this mode as specified in your instructions.");
   }
 
   if (graphData) parts.push(graphData);
@@ -240,16 +345,20 @@ async function formatWithLLM(message, resolved, intent, toolData, graphData) {
     parts.push("[TOOL DATA -- format this into your response]\n" + JSON.stringify(toolData, null, 2).slice(0, 2000));
   }
 
+  if (documentContext) {
+    parts.push(documentContext);
+  }
+
   parts.push("[USER MESSAGE]\n" + message);
 
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
-      { role: "system", content: SYSTEM },
+      { role: "system", content: buildSystemPrompt(intelligenceMode) },
       { role: "user",   content: parts.join("\n\n") },
     ],
     temperature: 0.3,
-    max_tokens: 900,
+    max_tokens:  900,
   });
 
   const raw = completion.choices?.[0]?.message?.content?.trim() || "";
@@ -276,48 +385,59 @@ function updateCtx(resolved, intent) {
   return { ...safeContext(resolved), lastIntent: intent };
 }
 
-//  Handler 
+// ─── Handler ──────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Origin",  "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-HireEdge-Plan, X-HireEdge-User-Id");
   if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed." });
+  if (req.method !== "POST")   return res.status(405).json({ error: "Method not allowed." });
 
   let body;
   try { body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {}; }
   catch { return res.status(400).json({ error: "Invalid JSON." }); }
 
-  const { message, context } = body;
+  const {
+    message,
+    context,
+    intelligence_mode,  // "salary" | "transition" | "skills" | "path" | undefined
+    fileName,           // original filename — display/logging only
+    fileType,           // "cv" | "jd" | "cover" | "document"
+    documentText,       // extracted plaintext from client-side document extraction
+  } = body;
+
   if (!message?.trim()) return res.status(400).json({ error: "message is required." });
 
   const msg      = message.trim();
   const resolved = resolveContext(context, msg);
 
-  //  1. Detect intent 
+  // 1. Detect intent
   const { intent, confidence, slots } = detectIntent(msg, resolved);
-  console.log("[chat] intent=" + intent + " confidence=" + confidence.toFixed(2) + " role=" + resolved.role + " target=" + resolved.target);
+  console.log("[chat] intent=" + intent + " confidence=" + confidence.toFixed(2) + " role=" + resolved.role + " target=" + resolved.target + " mode=" + (intelligence_mode||"none") + " hasDoc=" + !!documentText);
 
   // Merge extracted slots into resolved
   if (slots.role    && !resolved.role)    resolved.role    = slots.role;
   if (slots.target  && !resolved.target)  resolved.target  = slots.target;
   if (slots.country && !resolved.country) resolved.country = slots.country;
 
-  //  2. Validate required fields 
+  // 2. Validate required fields
   const clarification = validateRequest(intent, resolved);
   if (clarification) {
-    console.log("[chat] clarification required, missing fields:", clarification.data.missing_fields);
+    console.log("[chat] clarification required:", clarification.data.missing_fields);
     return res.status(200).json(clarification);
   }
 
-  //  3. Route to tool 
+  // 3. Route to tool
   const route = routeTool(intent, { ...resolved, ...slots });
 
+  // 4. Build document context string (empty string when no document)
+  const documentContext = buildDocumentContext(fileType, fileName, documentText);
+
   try {
-    let toolData    = null;
-    let toolUsed    = null;
-    let toolError   = null;
+    let toolData  = null;
+    let toolUsed  = null;
+    let toolError = null;
 
     if (route?.canRoute) {
       console.log("[chat] routing to tool:", route.endpoint);
@@ -332,34 +452,36 @@ export default async function handler(req, res) {
       }
     }
 
-    //  4. LLM formats the response 
+    // 5. LLM formats the response
     if (!openai) {
       return res.status(200).json({
         ok: true,
         data: {
-          intent:      { name: intent, confidence },
-          tool_used:   toolUsed,
-          reply:       toolData ? JSON.stringify(toolData).slice(0, 300) : "EDGEX is initialising.",
+          intent:       { name: intent, confidence },
+          tool_used:    toolUsed,
+          reply:        toolData ? JSON.stringify(toolData).slice(0, 300) : "EDGEX is initialising.",
           next_actions: [],
-          context:     updateCtx(resolved, intent),
+          context:      updateCtx(resolved, intent),
         },
       });
     }
 
     const graphData = buildCareerGraph(resolved.role, resolved.target);
-    const { reply, nextActions } = await formatWithLLM(msg, resolved, intent, toolData, graphData);
+    const { reply, nextActions } = await formatWithLLM(
+      msg, resolved, intent, toolData, graphData, intelligence_mode, documentContext
+    );
 
     return res.status(200).json({
       ok: true,
       data: {
-        intent:      { name: intent, confidence },
-        tool_used:   toolUsed,
-        tool_error:  toolError || undefined,
+        intent:          { name: intent, confidence },
+        tool_used:       toolUsed,
+        tool_error:      toolError || undefined,
         reply,
-        next_actions: nextActions,
-        context:     updateCtx(resolved, intent),
+        next_actions:    nextActions,
+        context:         updateCtx(resolved, intent),
         recommendations: [],
-        insights:    null,
+        insights:        null,
       },
     });
 
